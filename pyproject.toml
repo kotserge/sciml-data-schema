@@ -1,0 +1,23 @@
+[project]
+name = "core"
+version = "0.1.0"
+description = "Shared dataset format and metadata schema."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "h5py>=3.10",
+    "numpy>=1.24",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.basedpyright]
+# Resolve third-party imports (h5py, numpy) against the project's own venv.
+venvPath = "."
+venv = ".venv"
+# "standard" is a real type check; it drops the strict-only rules that only fire
+# because h5py ships no type stubs (reportUnknownMemberType, reportImportCycles, ...).
+typeCheckingMode = "standard"
+reportMissingTypeStubs = false
