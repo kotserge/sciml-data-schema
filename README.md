@@ -1,13 +1,15 @@
-# core
+# sciml-data-schema
 
-Shared dataset format and metadata schema — the neutral middle that `datagen`
-and `ml` both depend on. Data is exchanged exclusively as HDF5 files in this
-format. The full design is in [`SCHEMA.md`](SCHEMA.md).
+An HDF5 dataset format and metadata schema for PDE / physics simulation data,
+designed for scientific machine learning. A single file holds one dataset of
+`n_trajectories` independent runs over a shared spatial domain. The full design
+is in [`SCHEMA.md`](SCHEMA.md).
 
-- `core.schema` — in-memory dataset representation (`Dataset`, `Field`,
-  `FieldSpec`, `Dimension`, `BoundaryCondition`, `Normalization`) and the
-  canonical HDF5 group/attribute names.
-- `core.io` — `read_dataset` / `write_dataset` (the only module that touches HDF5).
+- `sciml_data_schema.schema` — the in-memory dataset representation (`Dataset`,
+  `Field`, `FieldSpec`, `Dimension`, `BoundaryCondition`, `Normalization`) and
+  the canonical HDF5 group/attribute names.
+- `sciml_data_schema.io` — `read_dataset` / `write_dataset` (the only module
+  that touches HDF5).
 
 ## The unified field model
 
@@ -31,10 +33,58 @@ contains, and per-field `normalization` stats. The grid profile stores spatial
 coordinate vectors under `dimensions`. Train/val/test splits are left to
 downstream consumers rather than baked into the stored format.
 
-```python
-import core
+## Installation
 
-ds = core.read_dataset("run.h5")
+```bash
+pip install sciml-data-schema
+```
+
+Or, from a checkout (uses [uv](https://docs.astral.sh/uv/)):
+
+```bash
+uv sync --extra dev
+```
+
+Requires Python 3.11+. Runtime dependencies are `h5py` and `numpy`.
+
+## Usage
+
+```python
+import numpy as np
+import sciml_data_schema as sds
+
+dataset = sds.Dataset(
+    dataset_name="poisson_2d",
+    representation="grid",
+    n_spatial_dims=2,
+    n_trajectories=1,
+    spatial_dims=["x", "y"],
+    dimensions=[
+        sds.Dimension("x", np.linspace(0, 1, 32)),
+        sds.Dimension("y", np.linspace(0, 1, 32)),
+    ],
+    fields=[
+        sds.Field("u", np.zeros((1, 32, 32)), role="state", time_varying=False),
+    ],
+)
+
+sds.write_dataset(dataset, "run.h5", compression="gzip")
+
+ds = sds.read_dataset("run.h5")
 u = next(f for f in ds.fields if f.role == "state")
-core.write_dataset(ds, "copy.h5", compression="gzip")
+```
+
+`write_dataset` validates the dataset before touching disk, so a malformed
+dataset raises `ValueError` and leaves no file behind. See
+[`examples/advection_diffusion.py`](examples/advection_diffusion.py) for a
+complete, runnable scenario (build → write → read → role-routed window).
+
+## Development
+
+```bash
+uv sync --extra dev
+uv run pytest        # tests
+uv run ruff check    # lint
+uv run ruff format   # format
+uv run basedpyright  # type-check
 ```

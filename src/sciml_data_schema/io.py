@@ -1,8 +1,8 @@
-"""HDF5 read/write for :class:`core.schema.Dataset`.
+"""HDF5 read/write for :class:`sciml_data_schema.schema.Dataset`.
 
 This is the only module that imports ``h5py``. Everything else works with the
-plain-Python objects from :mod:`core.schema`, so the on-disk layout can change
-here without rippling through the codebase.
+plain-Python objects from :mod:`sciml_data_schema.schema`, so the on-disk layout
+can change here without rippling through the codebase.
 
 The file mirrors the schema's shared core layout: root attributes (versions,
 ``representation``, the ``field_registry`` JSON, and the ``present_fields``
@@ -92,9 +92,7 @@ def read_dataset(path: StrPath) -> s.Dataset:
 # --- group writers ------------------------------------------------------------
 
 
-def _write_dimensions(
-    f: h5py.File, dimensions: list[s.Dimension], spatial_dims: list[str]
-) -> None:
+def _write_dimensions(f: h5py.File, dimensions: list[s.Dimension], spatial_dims: list[str]) -> None:
     grp = f.create_group(s.GROUP_DIMENSIONS)
     grp.attrs[s.ATTR_SPATIAL_DIMS] = _str_array(spatial_dims)
     for dim in dimensions:
@@ -179,10 +177,7 @@ def _read_dimensions(f: h5py.File) -> list[s.Dimension]:
     grp = _open_group(f, s.GROUP_DIMENSIONS)
     if grp is None:
         return []
-    return [
-        s.Dimension(name=name, coordinates=np.asarray(ds[()]))
-        for name, ds in _datasets(grp)
-    ]
+    return [s.Dimension(name=name, coordinates=np.asarray(ds[()])) for name, ds in _datasets(grp)]
 
 
 def _read_boundary_conditions(f: h5py.File) -> list[s.BoundaryCondition]:

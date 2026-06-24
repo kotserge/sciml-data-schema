@@ -25,8 +25,9 @@ files of a representation, so ``velocity`` means the same thing everywhere. Each
 file declares which registry entries are actually present.
 
 This module defines the pure-Python representation (:class:`Dataset` and its
-parts) plus the canonical HDF5 group/attribute names. :mod:`core.io` is the only
-place that touches HDF5; it serializes the objects defined here.
+parts) plus the canonical HDF5 group/attribute names.
+:mod:`sciml_data_schema.io` is the only place that touches HDF5; it serializes
+the objects defined here.
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ SCHEMA_VERSION = "0.1.0"
 # vocabulary) can evolve without a layout change, and vice versa.
 REGISTRY_VERSION = "0.1.0"
 
-# --- Canonical HDF5 names (single source of truth, shared with core.io) -------
+# --- Canonical HDF5 names (single source of truth, shared with sciml_data_schema.io) -
 
 GROUP_DIMENSIONS = "dimensions"
 GROUP_BOUNDARY_CONDITIONS = "boundary_conditions"
@@ -317,7 +318,7 @@ class Dataset:
 
 # --- Registry (de)serialization ----------------------------------------------
 # The registry travels as a single JSON root attribute; keep its encoding next
-# to the schema so core.io stays a thin HDF5 shim.
+# to the schema so sciml_data_schema.io stays a thin HDF5 shim.
 
 
 def registry_to_json(registry: dict[str, FieldSpec]) -> str:

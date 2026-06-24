@@ -137,7 +137,7 @@ Common to every profile.
 
 ```
 /                                   (root)
-├── @schema_version        : "0.1"
+├── @schema_version        : "0.1.0"
 ├── @dataset_name          : str
 ├── @representation        : "grid" | "mesh" | "particle"
 ├── @n_spatial_dims        : 1 | 2 | 3
