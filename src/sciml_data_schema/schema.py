@@ -262,6 +262,16 @@ class Dataset:
         """Names of the fields actually stored in this file, in insertion order."""
         return [f.name for f in self.fields]
 
+    @property
+    def coords(self) -> dict[str, np.ndarray]:
+        """Coordinate vector per dimension name (e.g. ``{"time": ..., "x": ...}``).
+
+        The dimensions' coordinate arrays keyed by name — what consumers need to
+        recover physical spacings (``coords["x"][1] - coords["x"][0]``) without
+        re-deriving the mapping each time.
+        """
+        return {d.name: np.asarray(d.coordinates) for d in self.dimensions}
+
     def effective_registry(self) -> dict[str, FieldSpec]:
         """The registry written to disk: explicit entries, plus every present
         field (whose spec fills any gap). Explicit entries take precedence.

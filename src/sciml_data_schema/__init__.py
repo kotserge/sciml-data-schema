@@ -13,6 +13,7 @@ per-file extent flags.
 """
 
 from .io import read_dataset, write_dataset
+from .provenance import git_revision
 from .schema import (
     REGISTRY_VERSION,
     SCHEMA_VERSION,
@@ -36,6 +37,7 @@ __all__ = [
     "FieldSpec",
     "Normalization",
     "__version__",
+    "git_revision",
     "read_dataset",
     "write_dataset",
 ]
