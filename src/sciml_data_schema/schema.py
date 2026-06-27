@@ -64,6 +64,9 @@ ATTR_N_SPATIAL_DIMS = "n_spatial_dims"
 ATTR_N_TRAJECTORIES = "n_trajectories"
 ATTR_FIELD_REGISTRY = "field_registry"
 ATTR_PRESENT_FIELDS = "present_fields"
+# Optional free-form provenance (JSON object of string values), e.g. the
+# generator's resolved config, git revision, and creation time.
+ATTR_PROVENANCE = "provenance"
 
 # `spatial_dims` is an attribute of the `dimensions` group (the spatial axis
 # names; their coordinates are profile-specific datasets in the same group).
@@ -249,6 +252,10 @@ class Dataset:
     # Optional explicit registry. May be a *superset* of the present fields (the
     # shared cross-file vocabulary); if left empty it is derived from `fields`.
     field_registry: dict[str, FieldSpec] = field(default_factory=dict)
+    # Optional free-form provenance: how this file was generated (resolved config,
+    # git revision, timestamp, ...). String values; written verbatim, never
+    # interpreted by the schema. Empty by default.
+    provenance: dict[str, str] = field(default_factory=dict)
 
     @property
     def present_fields(self) -> list[str]:

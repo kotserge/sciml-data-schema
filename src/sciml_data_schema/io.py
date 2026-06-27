@@ -14,6 +14,7 @@ attributes; its tensor order, role, and unit come from the registry.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from os import PathLike
 from pathlib import Path
@@ -57,6 +58,8 @@ def write_dataset(
         f.attrs[s.ATTR_N_TRAJECTORIES] = dataset.n_trajectories
         f.attrs[s.ATTR_FIELD_REGISTRY] = s.registry_to_json(registry)
         f.attrs[s.ATTR_PRESENT_FIELDS] = _str_array(dataset.present_fields)
+        if dataset.provenance:
+            f.attrs[s.ATTR_PROVENANCE] = json.dumps(dataset.provenance)
 
         _write_dimensions(f, dataset.dimensions, dataset.spatial_dims)
         _write_boundary_conditions(f, dataset.boundary_conditions, compression)
@@ -84,9 +87,17 @@ def read_dataset(path: StrPath) -> s.Dataset:
             boundary_conditions=_read_boundary_conditions(f),
             normalization=_read_normalization(f),
             field_registry=registry,
+            provenance=_read_provenance(f),
         )
     dataset.validate()
     return dataset
+
+
+def _read_provenance(f: h5py.File) -> dict[str, str]:
+    """Read the optional free-form provenance object (absent in older files)."""
+    if s.ATTR_PROVENANCE not in f.attrs:
+        return {}
+    return json.loads(_as_str(f.attrs[s.ATTR_PROVENANCE]))
 
 
 # --- group writers ------------------------------------------------------------
