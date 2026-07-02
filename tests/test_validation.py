@@ -96,6 +96,29 @@ def test_ndim_mismatch(make_dataset):
         ds.validate()
 
 
+def test_n_spatial_dims_out_of_range(make_dataset):
+    ds = make_dataset()
+    ds.n_spatial_dims = 4  # exceeds the rank ceiling
+    with pytest.raises(ValueError, match="between 0 and 3"):
+        ds.validate()
+
+
+def test_zero_spatial_dims_rejects_dim_varying():
+    """With no spatial axes, a field cannot be dim_varying."""
+    u = np.zeros((2, 5), dtype=np.float32)
+    ds = sds.Dataset(
+        dataset_name="ode",
+        representation="grid",
+        n_spatial_dims=0,
+        n_trajectories=2,
+        spatial_dims=[],
+        dimensions=[sds.Dimension("time", np.arange(5, dtype=np.float32))],
+        fields=[sds.Field("u", u, role="state", dim_varying=True, time_varying=True)],
+    )
+    with pytest.raises(ValueError, match="dim_varying"):
+        ds.validate()
+
+
 def test_tensor_axis_wrong_length(make_dataset):
     ds = make_dataset()
     # A vector field whose component axis is length 3 in a 2D domain.

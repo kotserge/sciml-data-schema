@@ -14,7 +14,8 @@ conventions but restructured around two principles it lacks:
    `sample_varying`). A "scalar parameter" is just a rank-0 field that doesn't
    vary in space or time.
 
-Scope ceilings (inherited, deliberate): spatial dimensions ≤ 3; tensor rank ≤ 2.
+Scope ceilings (inherited, deliberate): spatial dimensions ≤ 3 (and `0` for problems
+with no spatial domain, e.g. ODEs — a time axis only); tensor rank ≤ 2.
 Cross-representation training is **not** a goal — grid and mesh files are never
 mixed in one batch — so the profiles need only agree on the core, not on spatial
 layout.
@@ -140,7 +141,7 @@ Common to every profile.
 ├── @schema_version        : "0.1.0"
 ├── @dataset_name          : str
 ├── @representation        : "grid" | "mesh" | "particle"
-├── @n_spatial_dims        : 1 | 2 | 3
+├── @n_spatial_dims        : 0 | 1 | 2 | 3   # 0 = no spatial domain (ODE); time axis only
 ├── @n_trajectories        : int
 ├── @field_registry        : JSON (see §2)
 ├── @present_fields        : list[str]         # which registry entries are here
@@ -260,6 +261,31 @@ boundary_conditions/
 `velocity` + `pressure` are targets; `body_force` + `reynolds` are conditioning
 inputs. `reynolds` is stored as one number per trajectory and broadcast — the
 "scalar parameter" case, with no special group.
+
+### C. Controlled ODE, no spatial domain (grid profile, `n_spatial_dims = 0`)
+
+`du/dt = a·c(t) + b` on `t ∈ [0, T]`. The operator maps the control `c(·)` (+ the
+initial value `u(0)`) to the solution `u(·)`. There is **no** spatial coordinate — the
+only independent variable, `t`, is the time axis — so `n_spatial_dims = 0` and
+`spatial_dims = []`.
+
+```
+representation = "grid",  n_spatial_dims = 0,  spatial_dims = []
+present_fields = ["u", "control", "coeff_a", "coeff_b"]
+dimensions/      : time (L,)
+t0_fields/
+  u        : (n_traj, L)     role=state,     dim_varying=False, time_varying=True
+  control  : (n_traj, L)     role=forcing,   dim_varying=False, time_varying=True
+  coeff_a  : (n_traj,)       role=parameter, dim_varying=False, time_varying=False
+  coeff_b  : (n_traj,)       role=parameter, dim_varying=False, time_varying=False
+```
+
+`u` is the prediction target; `control` + `coeff_a`/`coeff_b` are conditioning inputs
+(by role). The initial condition `u(0)` is `u[:, 0]` (§3: "IC = t=0 slice of state"), so
+it is not stored separately. With zero spatial dims, **every** field is
+`dim_varying=False` (there is no spatial axis to vary over) — the validator enforces
+this. A spatial PDE is the same encoding with `dim_varying=True` and a non-empty
+`spatial_dims`; the ODE is its zero-space limit.
 
 ---
 

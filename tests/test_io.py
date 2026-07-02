@@ -108,6 +108,46 @@ def test_string_path_accepted(make_dataset, tmp_path):
     assert loaded.dataset_name == original.dataset_name
 
 
+def _ode_dataset() -> sds.Dataset:
+    """A valid ``n_spatial_dims=0`` dataset: a time axis only (an ODE)."""
+    rng = np.random.default_rng(0)
+    n_traj, length = 3, 5
+    t = np.arange(length, dtype=np.float32) * 0.02
+    u = rng.standard_normal((n_traj, length)).astype(np.float32)
+    control = rng.standard_normal((n_traj, length)).astype(np.float32)
+    coeff_a = rng.standard_normal((n_traj,)).astype(np.float32)
+    fields = [
+        sds.Field("u", u, role="state", dim_varying=False, time_varying=True),
+        sds.Field("control", control, role="forcing", dim_varying=False, time_varying=True),
+        sds.Field(
+            "coeff_a", coeff_a, role="parameter", dim_varying=False, time_varying=False
+        ),
+    ]
+    return sds.Dataset(
+        dataset_name="ode",
+        representation="grid",
+        n_spatial_dims=0,
+        n_trajectories=n_traj,
+        spatial_dims=[],
+        dimensions=[sds.Dimension("time", t)],
+        fields=fields,
+    )
+
+
+def test_zero_spatial_dims_roundtrip(tmp_path):
+    """A no-spatial-domain dataset (empty spatial_dims) writes and reads back intact."""
+    original = _ode_dataset()
+    loaded = sds.read_dataset(sds.write_dataset(original, tmp_path / "ode.h5"))
+
+    assert loaded.n_spatial_dims == 0
+    assert loaded.spatial_dims == []
+    assert loaded.present_fields == ["u", "control", "coeff_a"]
+    by_name = {f.name: f for f in loaded.fields}
+    for orig in original.fields:
+        np.testing.assert_array_equal(by_name[orig.name].data, orig.data)
+    np.testing.assert_array_equal(loaded.coords["time"], original.coords["time"])
+
+
 def test_invalid_dataset_is_not_written(tmp_path):
     """write_dataset validates first; a bad dataset leaves no file behind."""
     bad = sds.Dataset(

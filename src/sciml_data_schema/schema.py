@@ -40,7 +40,7 @@ import numpy as np
 
 # --- Versions -----------------------------------------------------------------
 
-SCHEMA_VERSION = "0.1.0"
+SCHEMA_VERSION = "0.2.0"
 # Versioned separately from the schema: the field registry (the canonical
 # vocabulary) can evolve without a layout change, and vice versa.
 REGISTRY_VERSION = "0.1.0"
@@ -294,6 +294,12 @@ class Dataset:
             raise ValueError(
                 f"representation {self.representation!r} is not one of {list(REPRESENTATIONS)}"
             )
+        # n_spatial_dims=0 is the no-spatial-domain case (e.g. an ODE: a time axis
+        # only). The upper bound is the schema's deliberate rank ceiling.
+        if not 0 <= self.n_spatial_dims <= 3:
+            raise ValueError(
+                f"n_spatial_dims must be between 0 and 3, got {self.n_spatial_dims}"
+            )
         if len(self.spatial_dims) != self.n_spatial_dims:
             raise ValueError(
                 f"spatial_dims {self.spatial_dims} has {len(self.spatial_dims)} entries "
@@ -307,6 +313,12 @@ class Dataset:
         registry = self.effective_registry()
         for f in self.fields:
             f.validate(self.n_spatial_dims)
+            # With no spatial axes, nothing can vary across space.
+            if self.n_spatial_dims == 0 and f.dim_varying:
+                raise ValueError(
+                    f"field {f.name!r}: dim_varying=True is invalid when n_spatial_dims=0 "
+                    f"(there is no spatial axis to vary over)"
+                )
             spec = registry[f.name]
             if (spec.tensor_order, spec.role, spec.unit) != (f.tensor_order, f.role, f.unit):
                 raise ValueError(
