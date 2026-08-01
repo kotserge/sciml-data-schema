@@ -1,9 +1,9 @@
 # sciml-data-schema
 
 An HDF5 dataset format and metadata schema for PDE / physics simulation data,
-designed for scientific machine learning. A single file holds one dataset of
-`n_trajectories` independent runs over a shared spatial domain. The full design
-is in [`SCHEMA.md`](SCHEMA.md).
+designed for scientific machine learning, based on the work of [The Well](https://github.com/PolymathicAI/the_well). 
+A single file holds one dataset of`n_trajectories` independent runs over a shared 
+spatial domain. The full design is in [`SCHEMA.md`](SCHEMA.md).
 
 - `sciml_data_schema.schema` — the in-memory dataset representation (`Dataset`,
   `Field`, `FieldSpec`, `Dimension`, `BoundaryCondition`, `Normalization`) and
