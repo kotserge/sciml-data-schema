@@ -98,3 +98,16 @@ def test_explicit_registry_takes_precedence_over_derived(make_dataset):
 def test_present_fields_preserves_insertion_order(make_dataset):
     ds = make_dataset()
     assert ds.present_fields == ["pressure", "velocity", "stress", "reynolds", "gravity"]
+
+
+def test_controlled_vocabularies_are_exported() -> None:
+    """The role/representation/grid/BC vocabularies appear in public signatures (Field.role,
+    Dataset.representation, BoundaryCondition.bc_type), so a producer annotating a helper that
+    builds one needs the type from the package root -- not from the defining module, which would
+    make it reach past the public interface for something it is already handed.
+    """
+    import sciml_data_schema as sds
+
+    for name in ("Role", "Representation", "GridType", "BCType"):
+        assert name in sds.__all__
+        assert getattr(sds, name) is getattr(sds.schema, name)
