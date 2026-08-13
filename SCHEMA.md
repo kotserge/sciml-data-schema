@@ -304,6 +304,13 @@ subclass overrides only spatial decoding.
 - **Grid subclass:** decodes `(…, X, Y[, Z])` arrays; coordinates from axis vectors.
 - **Mesh subclass:** decodes `(…, N_dof[, D])` arrays; attaches `geometry`/`dof_map`.
 
+**Writer contract (>= 0.3.0).** Datasets whose bulk fields exceed memory are written
+through an incremental `DatasetWriter`: metadata and small fields go first, streamed
+fields are created at full shape (chunked by trajectory/timestep) and filled
+trajectory-by-trajectory; closing verifies completeness, and any failure deletes the
+file — a partial write never leaves a valid-looking file. `write_dataset` is the
+all-inline degenerate case.
+
 **Within-representation multi-physics** uses a scenario-interleaved sampler
 above the loaders: each batch is drawn from one dataset (homogeneous spatial
 shape, trivial collate), datasets interleaved across batches. The field registry

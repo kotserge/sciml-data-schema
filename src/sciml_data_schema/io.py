@@ -25,7 +25,7 @@ import numpy as np
 
 from . import schema as s
 
-__all__ = ["write_dataset", "read_dataset"]
+__all__ = ["write_dataset", "read_dataset", "DatasetWriter", "field_placeholder"]
 
 StrPath = str | PathLike[str]
 
@@ -43,29 +43,159 @@ def write_dataset(
     """Validate ``dataset`` and write it to ``path`` as a single HDF5 file.
 
     ``compression`` is forwarded to every field dataset (e.g. ``"gzip"``);
-    ``None`` writes uncompressed.
+    ``None`` writes uncompressed. This is the degenerate all-inline case of
+    :class:`DatasetWriter` -- use that directly when a dataset's bulk fields do
+    not fit in memory.
     """
-    dataset.validate()
-    registry = dataset.effective_registry()
-    path = Path(path)
-    with h5py.File(path, mode) as f:
-        f.attrs[s.ATTR_SCHEMA_VERSION] = dataset.schema_version
-        f.attrs[s.ATTR_REGISTRY_VERSION] = dataset.registry_version
-        f.attrs[s.ATTR_DATASET_NAME] = dataset.dataset_name
-        f.attrs[s.ATTR_REPRESENTATION] = dataset.representation
-        f.attrs[s.ATTR_GRID_TYPE] = dataset.grid_type
-        f.attrs[s.ATTR_N_SPATIAL_DIMS] = dataset.n_spatial_dims
-        f.attrs[s.ATTR_N_TRAJECTORIES] = dataset.n_trajectories
-        f.attrs[s.ATTR_FIELD_REGISTRY] = s.registry_to_json(registry)
-        f.attrs[s.ATTR_PRESENT_FIELDS] = _str_array(dataset.present_fields)
-        if dataset.provenance:
-            f.attrs[s.ATTR_PROVENANCE] = json.dumps(dataset.provenance)
+    with DatasetWriter(dataset, path, streamed=(), mode=mode, compression=compression):
+        pass
+    return Path(path)
 
-        _write_dimensions(f, dataset.dimensions, dataset.spatial_dims)
-        _write_boundary_conditions(f, dataset.boundary_conditions, compression)
-        _write_normalization(f, dataset.normalization)
-        _write_fields(f, dataset.fields, compression)
-    return path
+
+def field_placeholder(shape: tuple[int, ...], dtype: np.dtype | type = np.float32) -> np.ndarray:
+    """Zero-copy stand-in for a streamed field's ``data``.
+
+    Gives a :class:`~sciml_data_schema.schema.Field` the shape and dtype the
+    validator needs without allocating the array; the values are never written.
+    Use it for the fields named in :class:`DatasetWriter`'s ``streamed``.
+    """
+    return np.broadcast_to(np.zeros((), dtype=dtype), shape)
+
+
+class DatasetWriter:
+    """Write a dataset whose bulk fields exceed memory, one trajectory at a time.
+
+    Construct with a complete :class:`~sciml_data_schema.schema.Dataset` in which
+    each field named in ``streamed`` carries :func:`field_placeholder` data (any
+    streamed field must be ``sample_varying`` -- the leading trajectory axis is what
+    :meth:`append` fills). On entering the context, the root metadata, dimensions,
+    boundary conditions, normalization, and every non-streamed field are written,
+    and each streamed field's HDF5 dataset is created at full shape, chunked by
+    trajectory (and timestep, if present). Leaving the context verifies that every
+    trajectory of every streamed field was written. On any failure -- an exception
+    inside the block, or missing trajectories -- the file is deleted, so a partial
+    write never leaves a valid-looking file behind.
+    """
+
+    def __init__(
+        self,
+        dataset: s.Dataset,
+        path: StrPath,
+        *,
+        streamed: tuple[str, ...] | list[str],
+        mode: str = "w",
+        compression: str | None = None,
+    ) -> None:
+        # Validate before touching the disk, mirroring write_dataset's contract.
+        dataset.validate()
+
+        # Streamed names must exist and have a leading trajectory axis to append along.
+        fields_by_name = {fld.name: fld for fld in dataset.fields}
+        unknown = set(streamed) - set(fields_by_name)
+        if unknown:
+            raise ValueError(f"streamed fields not in dataset: {sorted(unknown)}")
+        for name in streamed:
+            if not fields_by_name[name].sample_varying:
+                raise ValueError(f"streamed field {name!r} must be sample_varying")
+
+        self._dataset = dataset
+        self._path = Path(path)
+        self._streamed = tuple(streamed)
+        self._mode = mode
+        self._compression = compression
+        self._file: h5py.File | None = None
+        self._targets: dict[str, h5py.Dataset] = {}
+        self._written: dict[str, np.ndarray] = {}
+
+    def __enter__(self) -> DatasetWriter:
+        dataset = self._dataset
+        registry = dataset.effective_registry()
+
+        # Write everything except the streamed bulk; abort cleanly on any failure so
+        # no partial file survives.
+        self._file = f = h5py.File(self._path, self._mode)
+        try:
+            _write_root_attrs(f, dataset, registry)
+            _write_dimensions(f, dataset.dimensions, dataset.spatial_dims)
+            _write_boundary_conditions(f, dataset.boundary_conditions, self._compression)
+            _write_normalization(f, dataset.normalization)
+            self._targets = _write_fields(
+                f, dataset.fields, self._compression, streamed=frozenset(self._streamed)
+            )
+        except Exception:
+            self._abort()
+            raise
+
+        self._written = {
+            name: np.zeros(self._targets[name].shape[0], dtype=bool) for name in self._streamed
+        }
+        return self
+
+    def append(self, name: str, trajectory: int, data: np.ndarray) -> None:
+        """Write one trajectory's slice of streamed field ``name``, shape/dtype-checked."""
+        if self._file is None:
+            raise RuntimeError("DatasetWriter used outside its context")
+        if name not in self._targets:
+            raise KeyError(f"not a streamed field: {name!r}")
+
+        target = self._targets[name]
+        if not 0 <= trajectory < target.shape[0]:
+            raise IndexError(
+                f"field {name!r}: trajectory {trajectory} outside [0, {target.shape[0]})"
+            )
+        data = np.asarray(data)
+        if data.shape != target.shape[1:]:
+            raise ValueError(
+                f"field {name!r}, trajectory {trajectory}: expected shape "
+                f"{target.shape[1:]}, got {data.shape}"
+            )
+        if data.dtype != target.dtype:
+            raise ValueError(
+                f"field {name!r}, trajectory {trajectory}: expected dtype "
+                f"{target.dtype}, got {data.dtype}"
+            )
+
+        target[trajectory] = data
+        self._written[name][trajectory] = True
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        # An exception inside the block wins; drop the partial file and re-raise.
+        if exc_type is not None:
+            self._abort()
+            return False
+
+        missing = {
+            name: int((~mask).sum()) for name, mask in self._written.items() if not mask.all()
+        }
+        if missing:
+            self._abort()
+            raise ValueError(f"incomplete streamed fields (missing trajectories): {missing}")
+
+        assert self._file is not None
+        self._file.close()
+        self._file = None
+        return False
+
+    def _abort(self) -> None:
+        """Close the handle and remove the partial file."""
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+        self._path.unlink(missing_ok=True)
+
+
+def _write_root_attrs(f: h5py.File, dataset: s.Dataset, registry: dict[str, s.FieldSpec]) -> None:
+    f.attrs[s.ATTR_SCHEMA_VERSION] = dataset.schema_version
+    f.attrs[s.ATTR_REGISTRY_VERSION] = dataset.registry_version
+    f.attrs[s.ATTR_DATASET_NAME] = dataset.dataset_name
+    f.attrs[s.ATTR_REPRESENTATION] = dataset.representation
+    f.attrs[s.ATTR_GRID_TYPE] = dataset.grid_type
+    f.attrs[s.ATTR_N_SPATIAL_DIMS] = dataset.n_spatial_dims
+    f.attrs[s.ATTR_N_TRAJECTORIES] = dataset.n_trajectories
+    f.attrs[s.ATTR_FIELD_REGISTRY] = s.registry_to_json(registry)
+    f.attrs[s.ATTR_PRESENT_FIELDS] = _str_array(dataset.present_fields)
+    if dataset.provenance:
+        f.attrs[s.ATTR_PROVENANCE] = json.dumps(dataset.provenance)
 
 
 def read_dataset(path: StrPath) -> s.Dataset:
@@ -138,19 +268,50 @@ def _write_normalization(f: h5py.File, normalization: dict[str, s.Normalization]
             sub.attrs[s.ATTR_MAX] = np.asarray(norm.max)
 
 
-def _write_fields(f: h5py.File, fields: list[s.Field], compression: str | None) -> None:
+def _stream_chunks(fld: s.Field, shape: tuple[int, ...]) -> tuple[int, ...]:
+    """Chunk layout for a streamed field: one (trajectory, timestep) slab per chunk
+    when a time axis exists, one trajectory otherwise -- matching how loaders read.
+    """
+    if fld.time_varying and len(shape) >= 2:
+        return (1, 1, *shape[2:])
+    return (1, *shape[1:])
+
+
+def _write_fields(
+    f: h5py.File,
+    fields: list[s.Field],
+    compression: str | None,
+    *,
+    streamed: frozenset[str] = frozenset(),
+) -> dict[str, h5py.Dataset]:
+    """Write all field datasets; ``streamed`` ones are created empty at full shape
+    (their placeholder data ignored) and returned for trajectory-wise filling.
+    """
     # Create every field group up front so readers can rely on their presence.
     groups = {order: f.create_group(name) for order, name in s.FIELD_GROUPS.items()}
+
+    targets: dict[str, h5py.Dataset] = {}
     for fld in fields:
-        ds = groups[fld.tensor_order].create_dataset(
-            fld.name, data=np.asarray(fld.data), compression=compression
-        )
+        if fld.name in streamed:
+            ds = groups[fld.tensor_order].create_dataset(
+                fld.name,
+                shape=fld.data.shape,
+                dtype=fld.data.dtype,
+                compression=compression,
+                chunks=_stream_chunks(fld, fld.data.shape),
+            )
+            targets[fld.name] = ds
+        else:
+            ds = groups[fld.tensor_order].create_dataset(
+                fld.name, data=np.asarray(fld.data), compression=compression
+            )
         ds.attrs[s.ATTR_DIM_VARYING] = bool(fld.dim_varying)
         ds.attrs[s.ATTR_TIME_VARYING] = bool(fld.time_varying)
         ds.attrs[s.ATTR_SAMPLE_VARYING] = bool(fld.sample_varying)
         if fld.tensor_order == 2:
             ds.attrs[s.ATTR_SYMMETRIC] = bool(fld.symmetric)
             ds.attrs[s.ATTR_ANTISYMMETRIC] = bool(fld.antisymmetric)
+    return targets
 
 
 # --- group readers ------------------------------------------------------------
