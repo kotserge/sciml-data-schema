@@ -106,19 +106,21 @@ class DatasetWriter:
         self._file: h5py.File | None = None
         self._targets: dict[str, h5py.Dataset] = {}
         self._written: dict[str, np.ndarray] = {}
+        # Normalization is deferred to close: stats of streamed fields are typically
+        # only known after the pass, so producers may update entries mid-stream.
+        self._normalization = dict(dataset.normalization)
 
     def __enter__(self) -> DatasetWriter:
         dataset = self._dataset
         registry = dataset.effective_registry()
 
-        # Write everything except the streamed bulk; abort cleanly on any failure so
-        # no partial file survives.
+        # Write everything except the streamed bulk (and the normalization, which is
+        # written on close); abort cleanly on any failure so no partial file survives.
         self._file = f = h5py.File(self._path, self._mode)
         try:
             _write_root_attrs(f, dataset, registry)
             _write_dimensions(f, dataset.dimensions, dataset.spatial_dims)
             _write_boundary_conditions(f, dataset.boundary_conditions, self._compression)
-            _write_normalization(f, dataset.normalization)
             self._targets = _write_fields(
                 f, dataset.fields, self._compression, streamed=frozenset(self._streamed)
             )
@@ -158,6 +160,16 @@ class DatasetWriter:
         target[trajectory] = data
         self._written[name][trajectory] = True
 
+    def update_normalization(self, name: str, normalization: s.Normalization) -> None:
+        """Set/replace field ``name``'s statistics before close — the home for stats
+        that are only known after streaming (e.g. an online mean/std over the pass).
+        """
+        if self._file is None:
+            raise RuntimeError("DatasetWriter used outside its context")
+        if name not in self._dataset.present_fields:
+            raise ValueError(f"normalization references unknown field {name!r}")
+        self._normalization[name] = normalization
+
     def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
         # An exception inside the block wins; drop the partial file and re-raise.
         if exc_type is not None:
@@ -172,6 +184,7 @@ class DatasetWriter:
             raise ValueError(f"incomplete streamed fields (missing trajectories): {missing}")
 
         assert self._file is not None
+        _write_normalization(self._file, self._normalization)
         self._file.close()
         self._file = None
         return False

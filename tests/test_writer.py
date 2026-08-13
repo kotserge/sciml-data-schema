@@ -83,6 +83,32 @@ def test_streamed_field_must_exist_and_be_sample_varying(make_dataset, tmp_path)
         sds.DatasetWriter(make_dataset(), tmp_path / "x.h5", streamed=("gravity",))
 
 
+def test_update_normalization_lands_in_file(make_dataset, tmp_path):
+    dataset, pressure = _streamed_copy(make_dataset(), "pressure")
+    path = tmp_path / "stats.h5"
+
+    with sds.DatasetWriter(dataset, path, streamed=("pressure",)) as w:
+        for i in range(pressure.shape[0]):
+            w.append("pressure", i, pressure[i])
+        # Stats computed during the pass replace the placeholder entry on close.
+        w.update_normalization(
+            "pressure",
+            sds.Normalization(
+                mean=np.asarray(pressure.mean()),
+                std=np.asarray(pressure.std()),
+                min=np.asarray(pressure.min()),
+                max=np.asarray(pressure.max()),
+            ),
+        )
+        with pytest.raises(ValueError, match="unknown field"):
+            w.update_normalization("nope", sds.Normalization(np.zeros(()), np.ones(())))
+
+    loaded = sds.read_dataset(path).normalization["pressure"]
+    np.testing.assert_allclose(loaded.mean, pressure.mean())
+    assert loaded.min is not None
+    np.testing.assert_allclose(loaded.min, pressure.min())
+
+
 def test_write_dataset_still_roundtrips_via_writer(make_dataset, tmp_path):
     # write_dataset is now the degenerate streamed=() case; a plain roundtrip stays intact.
     original = make_dataset()
