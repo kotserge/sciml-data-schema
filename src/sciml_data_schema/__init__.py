@@ -12,7 +12,7 @@ every physical quantity -- solution, forcing, coefficient, parameter -- is a
 per-file extent flags.
 """
 
-from .io import DatasetWriter, field_placeholder, read_dataset, write_dataset
+from .io import Compression, DatasetWriter, field_placeholder, read_dataset, write_dataset
 from .provenance import git_revision
 from .schema import (
     REGISTRY_VERSION,
@@ -48,6 +48,7 @@ __all__ = [
     "Normalization",
     "Representation",
     "Role",
+    "Compression",
     "DatasetWriter",
     "__version__",
     "field_placeholder",

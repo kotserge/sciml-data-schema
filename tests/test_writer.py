@@ -109,6 +109,25 @@ def test_update_normalization_lands_in_file(make_dataset, tmp_path):
     np.testing.assert_allclose(loaded.min, pressure.min())
 
 
+def test_compression_spec_is_applied_and_roundtrips(make_dataset, tmp_path):
+    import h5py
+
+    spec = sds.Compression("gzip", level=1, shuffle=True)
+    path = sds.write_dataset(make_dataset(), tmp_path / "filtered.h5", compression=spec)
+
+    with h5py.File(path, "r") as f:
+        pressure = f["t0_fields/pressure"]
+        assert isinstance(pressure, h5py.Dataset)
+        assert pressure.compression == "gzip"
+        assert pressure.compression_opts == 1
+        assert pressure.shuffle is True
+
+    loaded = sds.read_dataset(path)
+    np.testing.assert_array_equal(
+        np.asarray(loaded.fields[0].data), np.asarray(make_dataset().fields[0].data)
+    )
+
+
 def test_write_dataset_still_roundtrips_via_writer(make_dataset, tmp_path):
     # write_dataset is now the degenerate streamed=() case; a plain roundtrip stays intact.
     original = make_dataset()

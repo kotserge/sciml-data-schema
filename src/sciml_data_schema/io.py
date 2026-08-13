@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
 from typing import cast
@@ -25,7 +26,7 @@ import numpy as np
 
 from . import schema as s
 
-__all__ = ["write_dataset", "read_dataset", "DatasetWriter", "field_placeholder"]
+__all__ = ["write_dataset", "read_dataset", "Compression", "DatasetWriter", "field_placeholder"]
 
 StrPath = str | PathLike[str]
 
@@ -33,17 +34,53 @@ StrPath = str | PathLike[str]
 _STR = h5py.string_dtype("utf-8")
 
 
+@dataclass(frozen=True)
+class Compression:
+    """HDF5 storage filters applied to every field dataset.
+
+    ``level`` applies to gzip only. ``shuffle`` is the byte-shuffle filter, which
+    typically improves both ratio and speed on float data — e.g.
+    ``Compression("gzip", level=1, shuffle=True)`` beats plain gzip on all three of
+    size, read, and write throughput for smooth physical fields.
+    """
+
+    name: str | None = None
+    level: int | None = None
+    shuffle: bool = False
+
+    def dataset_kwargs(self) -> dict[str, object]:
+        """The ``h5py.create_dataset`` keyword arguments this spec translates to."""
+        kwargs: dict[str, object] = {"shuffle": self.shuffle}
+        if self.name is not None:
+            kwargs["compression"] = self.name
+            if self.level is not None:
+                kwargs["compression_opts"] = self.level
+        return kwargs
+
+
+CompressionLike = str | Compression | None
+
+
+def _as_compression(value: CompressionLike) -> Compression:
+    """Normalize the accepted forms (``None``, a filter name, a full spec)."""
+    if value is None:
+        return Compression()
+    if isinstance(value, str):
+        return Compression(name=value)
+    return value
+
+
 def write_dataset(
     dataset: s.Dataset,
     path: StrPath,
     *,
     mode: str = "w",
-    compression: str | None = None,
+    compression: CompressionLike = None,
 ) -> Path:
     """Validate ``dataset`` and write it to ``path`` as a single HDF5 file.
 
-    ``compression`` is forwarded to every field dataset (e.g. ``"gzip"``);
-    ``None`` writes uncompressed. This is the degenerate all-inline case of
+    ``compression`` is a filter name (e.g. ``"gzip"``), a :class:`Compression`
+    spec, or ``None`` for uncompressed. This is the degenerate all-inline case of
     :class:`DatasetWriter` -- use that directly when a dataset's bulk fields do
     not fit in memory.
     """
@@ -84,7 +121,7 @@ class DatasetWriter:
         *,
         streamed: tuple[str, ...] | list[str],
         mode: str = "w",
-        compression: str | None = None,
+        compression: CompressionLike = None,
     ) -> None:
         # Validate before touching the disk, mirroring write_dataset's contract.
         dataset.validate()
@@ -102,7 +139,7 @@ class DatasetWriter:
         self._path = Path(path)
         self._streamed = tuple(streamed)
         self._mode = mode
-        self._compression = compression
+        self._compression = _as_compression(compression)
         self._file: h5py.File | None = None
         self._targets: dict[str, h5py.Dataset] = {}
         self._written: dict[str, np.ndarray] = {}
@@ -254,7 +291,7 @@ def _write_dimensions(f: h5py.File, dimensions: list[s.Dimension], spatial_dims:
 
 
 def _write_boundary_conditions(
-    f: h5py.File, bcs: list[s.BoundaryCondition], compression: str | None
+    f: h5py.File, bcs: list[s.BoundaryCondition], compression: Compression
 ) -> None:
     grp = f.create_group(s.GROUP_BOUNDARY_CONDITIONS)
     for bc in bcs:
@@ -263,9 +300,11 @@ def _write_boundary_conditions(
         sub.attrs[s.ATTR_ASSOCIATED_FIELDS] = _str_array(bc.associated_fields)
         sub.attrs[s.ATTR_ASSOCIATED_DIMS] = _str_array(bc.associated_dims)
         if bc.mask is not None:
-            sub.create_dataset("mask", data=np.asarray(bc.mask), compression=compression)
+            sub.create_dataset("mask", data=np.asarray(bc.mask), **compression.dataset_kwargs())
         if bc.values is not None:
-            sub.create_dataset("values", data=np.asarray(bc.values), compression=compression)
+            sub.create_dataset(
+                "values", data=np.asarray(bc.values), **compression.dataset_kwargs()
+            )
 
 
 def _write_normalization(f: h5py.File, normalization: dict[str, s.Normalization]) -> None:
@@ -293,7 +332,7 @@ def _stream_chunks(fld: s.Field, shape: tuple[int, ...]) -> tuple[int, ...]:
 def _write_fields(
     f: h5py.File,
     fields: list[s.Field],
-    compression: str | None,
+    compression: Compression,
     *,
     streamed: frozenset[str] = frozenset(),
 ) -> dict[str, h5py.Dataset]:
@@ -310,13 +349,13 @@ def _write_fields(
                 fld.name,
                 shape=fld.data.shape,
                 dtype=fld.data.dtype,
-                compression=compression,
                 chunks=_stream_chunks(fld, fld.data.shape),
+                **compression.dataset_kwargs(),
             )
             targets[fld.name] = ds
         else:
             ds = groups[fld.tensor_order].create_dataset(
-                fld.name, data=np.asarray(fld.data), compression=compression
+                fld.name, data=np.asarray(fld.data), **compression.dataset_kwargs()
             )
         ds.attrs[s.ATTR_DIM_VARYING] = bool(fld.dim_varying)
         ds.attrs[s.ATTR_TIME_VARYING] = bool(fld.time_varying)
