@@ -66,6 +66,15 @@ def test_roundtrip_normalization(make_dataset, tmp_path):
         np.testing.assert_allclose(loaded.normalization[name].mean, norm.mean)
         np.testing.assert_allclose(loaded.normalization[name].std, norm.std)
 
+    # The optional range stats survive where set ("pressure") and stay None where
+    # absent ("velocity") — i.e. files without them read back exactly as before 0.3.0.
+    pressure = loaded.normalization["pressure"]
+    assert pressure.min is not None and pressure.max is not None
+    np.testing.assert_allclose(pressure.min, np.asarray(original.normalization["pressure"].min))
+    np.testing.assert_allclose(pressure.max, np.asarray(original.normalization["pressure"].max))
+    assert loaded.normalization["velocity"].min is None
+    assert loaded.normalization["velocity"].max is None
+
 
 def test_roundtrip_boundary_conditions(make_dataset, tmp_path):
     original = make_dataset()

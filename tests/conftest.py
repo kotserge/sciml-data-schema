@@ -61,8 +61,12 @@ def _build() -> sds.Dataset:
     ]
 
     normalization = {
+        # Pressure additionally ships the optional range stats (schema >= 0.3.0).
         "pressure": sds.Normalization(
-            mean=np.asarray(pressure.mean()), std=np.asarray(pressure.std())
+            mean=np.asarray(pressure.mean()),
+            std=np.asarray(pressure.std()),
+            min=np.asarray(pressure.min()),
+            max=np.asarray(pressure.max()),
         ),
         "velocity": sds.Normalization(
             mean=velocity.mean(axis=(0, 1, 2, 3)), std=velocity.std(axis=(0, 1, 2, 3))

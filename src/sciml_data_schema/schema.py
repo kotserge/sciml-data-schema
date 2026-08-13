@@ -40,7 +40,7 @@ import numpy as np
 
 # --- Versions -----------------------------------------------------------------
 
-SCHEMA_VERSION = "0.2.0"
+SCHEMA_VERSION = "0.3.0"
 # Versioned separately from the schema: the field registry (the canonical
 # vocabulary) can evolve without a layout change, and vice versa.
 REGISTRY_VERSION = "0.1.0"
@@ -86,9 +86,12 @@ ATTR_BC_TYPE = "bc_type"
 ATTR_ASSOCIATED_FIELDS = "associated_fields"
 ATTR_ASSOCIATED_DIMS = "associated_dims"
 
-# Normalization attributes.
+# Normalization attributes. Mean/std are the required pair; min/max are optional
+# extra statistics (schema >= 0.3.0) for datasets shipping range-based stats.
 ATTR_MEAN = "mean"
 ATTR_STD = "std"
+ATTR_MIN = "min"
+ATTR_MAX = "max"
 
 # Field-registry JSON keys.
 REG_TENSOR_ORDER = "tensor_order"
@@ -227,10 +230,16 @@ class BoundaryCondition:
 class Normalization:
     """Shipped per-field statistics (per tensor component). The loader applies
     these rather than recomputing them.
+
+    ``mean``/``std`` are always present (z-score). ``min``/``max`` are optional
+    range statistics (schema >= 0.3.0) for datasets whose canonical normalization
+    is min-max scaling; a loader picks one strategy explicitly.
     """
 
     mean: np.ndarray
     std: np.ndarray
+    min: np.ndarray | None = None
+    max: np.ndarray | None = None
 
 
 @dataclass

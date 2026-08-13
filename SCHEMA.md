@@ -161,6 +161,8 @@ Common to every profile.
 │
 ├── normalization/
 │   └── <field_name>/  @mean, @std (per component)   # ship stats, don't recompute
+│       # optional @min, @max (>= 0.3.0) for datasets whose canonical
+│       # normalization is min-max scaling; loaders pick one strategy explicitly
 │
 ├── t0_fields/  <field datasets>     # rank-0 quantities (state/forcing/coeff/param)
 ├── t1_fields/  <field datasets>     # rank-1

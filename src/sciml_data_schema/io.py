@@ -131,6 +131,11 @@ def _write_normalization(f: h5py.File, normalization: dict[str, s.Normalization]
         sub = grp.create_group(name)
         sub.attrs[s.ATTR_MEAN] = np.asarray(norm.mean)
         sub.attrs[s.ATTR_STD] = np.asarray(norm.std)
+        # Range stats are optional (schema >= 0.3.0); absent attrs read back as None.
+        if norm.min is not None:
+            sub.attrs[s.ATTR_MIN] = np.asarray(norm.min)
+        if norm.max is not None:
+            sub.attrs[s.ATTR_MAX] = np.asarray(norm.max)
 
 
 def _write_fields(f: h5py.File, fields: list[s.Field], compression: str | None) -> None:
@@ -222,9 +227,13 @@ def _read_normalization(f: h5py.File) -> dict[str, s.Normalization]:
     for name, obj in grp.items():
         if not isinstance(obj, h5py.Group):
             raise TypeError(f"normalization entry {name!r} must be an HDF5 group")
+        norm_min = obj.attrs.get(s.ATTR_MIN)
+        norm_max = obj.attrs.get(s.ATTR_MAX)
         out[name] = s.Normalization(
             mean=np.asarray(obj.attrs[s.ATTR_MEAN]),
             std=np.asarray(obj.attrs[s.ATTR_STD]),
+            min=np.asarray(norm_min) if norm_min is not None else None,
+            max=np.asarray(norm_max) if norm_max is not None else None,
         )
     return out
 
