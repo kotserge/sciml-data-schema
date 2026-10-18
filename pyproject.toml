@@ -37,23 +37,33 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/sciml_data_schema"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# Lint rule families: pycodestyle (E, W), pyflakes (F), isort (I), pyupgrade (UP), bugbear (B),
+# pydocstyle (D), flake8-annotations (ANN).
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests", "examples"]
 
 [tool.ruff.lint]
-select = [
-    "E",   # pycodestyle errors
-    "F",   # pyflakes
-    "I",   # isort
-    "UP",  # pyupgrade
-    "B",   # flake8-bugbear
-    "W",   # pycodestyle warnings
-]
+select = ["E", "W", "F", "I", "UP", "B", "D", "ANN"]
+# D105/D107: magic methods and __init__ are documented by their class; D401: a summary states
+# what the unit computes, as a noun phrase or an imperative; ANN401: Any at the h5py boundary
+ignore = ["D105", "D107", "D401", "ANN401"]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
+[tool.ruff.lint.pydocstyle]
+# numpydoc sections: Parameters, Returns, Raises, Notes, Examples (CLAUDE.md, Docstrings)
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+# A test's name states what it checks; module docstrings stay required
+"tests/*" = ["D103"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["sciml_data_schema"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
 
 [tool.basedpyright]
 # Resolve third-party imports (h5py, numpy) against the project's own venv.
@@ -62,4 +72,5 @@ venv = ".venv"
 # "standard" is a real type check; it drops the strict-only rules that only fire
 # because h5py ships no type stubs (reportUnknownMemberType, reportImportCycles, ...).
 typeCheckingMode = "standard"
+include = ["src", "tests", "examples"]
 reportMissingTypeStubs = false
