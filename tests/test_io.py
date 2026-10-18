@@ -128,9 +128,7 @@ def _ode_dataset() -> sds.Dataset:
     fields = [
         sds.Field("u", u, role="state", dim_varying=False, time_varying=True),
         sds.Field("control", control, role="forcing", dim_varying=False, time_varying=True),
-        sds.Field(
-            "coeff_a", coeff_a, role="parameter", dim_varying=False, time_varying=False
-        ),
+        sds.Field("coeff_a", coeff_a, role="parameter", dim_varying=False, time_varying=False),
     ]
     return sds.Dataset(
         dataset_name="ode",

@@ -302,9 +302,7 @@ def _write_boundary_conditions(
         if bc.mask is not None:
             sub.create_dataset("mask", data=np.asarray(bc.mask), **compression.dataset_kwargs())
         if bc.values is not None:
-            sub.create_dataset(
-                "values", data=np.asarray(bc.values), **compression.dataset_kwargs()
-            )
+            sub.create_dataset("values", data=np.asarray(bc.values), **compression.dataset_kwargs())
 
 
 def _write_normalization(f: h5py.File, normalization: dict[str, s.Normalization]) -> None:

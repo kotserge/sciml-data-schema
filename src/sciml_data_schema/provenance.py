@@ -26,11 +26,15 @@ def git_revision(anchor: str | Path) -> str:
     try:
         sha = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
         dirty = subprocess.run(
             ["git", "-C", str(root), "status", "--porcelain"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
         return f"{sha}-dirty" if dirty else sha
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
