@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -9,14 +12,16 @@ import sciml_data_schema as sds
 
 
 @pytest.mark.parametrize("compression", [None, "gzip"])
-def test_roundtrip_preserves_everything(make_dataset, tmp_path, compression):
+def test_roundtrip_preserves_everything(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path, compression: str | None
+) -> None:
     original = make_dataset()
     path = sds.write_dataset(original, tmp_path / "data.h5", compression=compression)
     assert path.exists()
 
     loaded = sds.read_dataset(path)
 
-    # Root metadata.
+    # The root metadata
     assert loaded.dataset_name == original.dataset_name
     assert loaded.representation == original.representation
     assert loaded.grid_type == original.grid_type
@@ -28,7 +33,7 @@ def test_roundtrip_preserves_everything(make_dataset, tmp_path, compression):
     assert loaded.present_fields == original.present_fields
 
 
-def test_roundtrip_fields(make_dataset, tmp_path):
+def test_roundtrip_fields(make_dataset: Callable[[], sds.Dataset], tmp_path: Path) -> None:
     original = make_dataset()
     loaded = sds.read_dataset(sds.write_dataset(original, tmp_path / "data.h5"))
 
@@ -46,7 +51,7 @@ def test_roundtrip_fields(make_dataset, tmp_path):
         assert got.antisymmetric == orig.antisymmetric
 
 
-def test_roundtrip_dimensions(make_dataset, tmp_path):
+def test_roundtrip_dimensions(make_dataset: Callable[[], sds.Dataset], tmp_path: Path) -> None:
     original = make_dataset()
     loaded = sds.read_dataset(sds.write_dataset(original, tmp_path / "data.h5"))
 
@@ -57,7 +62,7 @@ def test_roundtrip_dimensions(make_dataset, tmp_path):
         np.testing.assert_array_equal(loaded_dims[name], coords)
 
 
-def test_roundtrip_normalization(make_dataset, tmp_path):
+def test_roundtrip_normalization(make_dataset: Callable[[], sds.Dataset], tmp_path: Path) -> None:
     original = make_dataset()
     loaded = sds.read_dataset(sds.write_dataset(original, tmp_path / "data.h5"))
 
@@ -66,8 +71,8 @@ def test_roundtrip_normalization(make_dataset, tmp_path):
         np.testing.assert_allclose(loaded.normalization[name].mean, norm.mean)
         np.testing.assert_allclose(loaded.normalization[name].std, norm.std)
 
-    # The optional range stats survive where set ("pressure") and stay None where
-    # absent ("velocity") — i.e. files without them read back exactly as before 0.3.0.
+    # The optional range statistics survive where set ("pressure") and read back as None where
+    # absent ("velocity"), as a file written before 0.3.0 does
     pressure = loaded.normalization["pressure"]
     assert pressure.min is not None and pressure.max is not None
     np.testing.assert_allclose(pressure.min, np.asarray(original.normalization["pressure"].min))
@@ -76,7 +81,9 @@ def test_roundtrip_normalization(make_dataset, tmp_path):
     assert loaded.normalization["velocity"].max is None
 
 
-def test_roundtrip_boundary_conditions(make_dataset, tmp_path):
+def test_roundtrip_boundary_conditions(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
     original = make_dataset()
     loaded = sds.read_dataset(sds.write_dataset(original, tmp_path / "data.h5"))
 
@@ -99,7 +106,9 @@ def test_roundtrip_boundary_conditions(make_dataset, tmp_path):
             np.testing.assert_array_equal(got.values, bc.values)
 
 
-def test_registry_written_for_all_present_fields(make_dataset, tmp_path):
+def test_registry_written_for_all_present_fields(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
     original = make_dataset()
     loaded = sds.read_dataset(sds.write_dataset(original, tmp_path / "data.h5"))
 
@@ -109,7 +118,7 @@ def test_registry_written_for_all_present_fields(make_dataset, tmp_path):
         assert (spec.tensor_order, spec.role, spec.unit) == (f.tensor_order, f.role, f.unit)
 
 
-def test_string_path_accepted(make_dataset, tmp_path):
+def test_string_path_accepted(make_dataset: Callable[[], sds.Dataset], tmp_path: Path) -> None:
     original = make_dataset()
     path = str(tmp_path / "data.h5")
     sds.write_dataset(original, path)
@@ -118,7 +127,14 @@ def test_string_path_accepted(make_dataset, tmp_path):
 
 
 def _ode_dataset() -> sds.Dataset:
-    """A valid ``n_spatial_dims=0`` dataset: a time axis only (an ODE)."""
+    """A valid ``n_spatial_dims=0`` dataset: a time axis only (an ODE).
+
+    Returns
+    -------
+    sds.Dataset
+        Three trajectories of five steps: ``u`` (state) and ``control`` (forcing), both
+        ``(3, 5)``, and ``coeff_a`` (parameter) ``(3,)``.
+    """
     rng = np.random.default_rng(0)
     n_traj, length = 3, 5
     t = np.arange(length, dtype=np.float32) * 0.02
@@ -141,7 +157,7 @@ def _ode_dataset() -> sds.Dataset:
     )
 
 
-def test_zero_spatial_dims_roundtrip(tmp_path):
+def test_zero_spatial_dims_roundtrip(tmp_path: Path) -> None:
     """A no-spatial-domain dataset (empty spatial_dims) writes and reads back intact."""
     original = _ode_dataset()
     loaded = sds.read_dataset(sds.write_dataset(original, tmp_path / "ode.h5"))
@@ -155,7 +171,7 @@ def test_zero_spatial_dims_roundtrip(tmp_path):
     np.testing.assert_array_equal(loaded.coords["time"], original.coords["time"])
 
 
-def test_invalid_dataset_is_not_written(tmp_path):
+def test_invalid_dataset_is_not_written(tmp_path: Path) -> None:
     """write_dataset validates first; a bad dataset leaves no file behind."""
     bad = sds.Dataset(
         dataset_name="bad",
