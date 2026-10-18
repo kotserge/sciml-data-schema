@@ -1,4 +1,4 @@
-"""Shared fixtures for the test suite."""
+"""Shared fixtures: a small 2D grid dataset with a field of every tensor order and extent."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 
 import sciml_data_schema as sds
 
-# Small, fixed dimensions used across the round-trip and validation tests.
+# The fixture's dimensions
 N_TRAJ = 3
 N_STEPS = 4
 NX, NY = 5, 6
@@ -17,15 +17,24 @@ N_DIMS = 2
 
 
 def _build() -> sds.Dataset:
-    """A valid 2D grid dataset exercising every schema feature."""
+    """A valid 2D grid dataset exercising every schema feature.
+
+    Returns
+    -------
+    sds.Dataset
+        Five fields: ``pressure`` (t0 state), ``velocity`` (t1 state), ``stress`` (t2 static
+        symmetric coefficient), ``reynolds`` (t0 per-trajectory parameter) and ``gravity``
+        (t0 global constant stored as ``(1,)``); statistics for ``pressure`` (with the range
+        statistics) and ``velocity``; a periodic and a Dirichlet boundary condition.
+    """
     rng = np.random.default_rng(0)
 
     pressure = rng.standard_normal((N_TRAJ, N_STEPS, NX, NY)).astype(np.float32)
     velocity = rng.standard_normal((N_TRAJ, N_STEPS, NX, NY, N_DIMS)).astype(np.float32)
-    # A static, symmetric rank-2 coefficient (no time axis).
+    # A static, symmetric rank-2 coefficient (no time axis)
     stress = rng.standard_normal((N_TRAJ, NX, NY, N_DIMS, N_DIMS)).astype(np.float32)
     reynolds = rng.standard_normal((N_TRAJ,)).astype(np.float32)
-    # A true global constant: all extent flags False, stored as a length-1 axis.
+    # A global constant: every extent flag off, stored as a length-1 axis
     gravity = np.array([9.81], dtype=np.float32)
 
     fields = [
@@ -60,8 +69,8 @@ def _build() -> sds.Dataset:
         ),
     ]
 
+    # Pressure also ships the optional range statistics (schema >= 0.3.0)
     normalization = {
-        # Pressure additionally ships the optional range stats (schema >= 0.3.0).
         "pressure": sds.Normalization(
             mean=np.asarray(pressure.mean()),
             std=np.asarray(pressure.std()),
@@ -105,5 +114,11 @@ def _build() -> sds.Dataset:
 
 @pytest.fixture
 def make_dataset() -> Callable[[], sds.Dataset]:
-    """Factory returning a fresh, valid dataset on each call (mutation-safe)."""
+    """A factory returning a fresh fixture dataset on each call.
+
+    Returns
+    -------
+    Callable[[], sds.Dataset]
+        :func:`_build`; each call builds anew, so a test may mutate its copy.
+    """
     return _build

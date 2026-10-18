@@ -1,8 +1,11 @@
-"""The incremental DatasetWriter: streamed output equals inline output, and no
-failure mode leaves a valid-looking partial file behind."""
+"""The incremental DatasetWriter: streamed output equals inline output, no partial file survives."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
+
+import h5py
 import numpy as np
 import pytest
 
@@ -10,17 +13,32 @@ import sciml_data_schema as sds
 
 
 def _streamed_copy(dataset: sds.Dataset, name: str) -> tuple[sds.Dataset, np.ndarray]:
-    """Swap field ``name``'s data for a placeholder; return the dataset + original data."""
+    """Swap field ``name``'s data for a placeholder of the same shape and dtype.
+
+    Parameters
+    ----------
+    dataset : sds.Dataset
+        The dataset to modify in place.
+    name : str
+        The field to stream.
+
+    Returns
+    -------
+    tuple[sds.Dataset, np.ndarray]
+        The same dataset, and the field's original data to feed to ``append``.
+    """
     fld = next(f for f in dataset.fields if f.name == name)
     original = np.asarray(fld.data)
     fld.data = sds.field_placeholder(original.shape, original.dtype)
     return dataset, original
 
 
-def test_streamed_write_equals_inline_write(make_dataset, tmp_path):
+def test_streamed_write_equals_inline_write(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
     inline_path = sds.write_dataset(make_dataset(), tmp_path / "inline.h5")
 
-    # Stream the two sample-varying state fields trajectory by trajectory.
+    # The two sample-varying state fields, streamed trajectory by trajectory
     streamed_ds, pressure = _streamed_copy(make_dataset(), "pressure")
     streamed_ds, velocity = _streamed_copy(streamed_ds, "velocity")
     streamed_path = tmp_path / "streamed.h5"
@@ -42,7 +60,9 @@ def test_streamed_write_equals_inline_write(make_dataset, tmp_path):
         )
 
 
-def test_missing_trajectory_fails_and_removes_file(make_dataset, tmp_path):
+def test_missing_trajectory_fails_and_removes_file(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
     dataset, pressure = _streamed_copy(make_dataset(), "pressure")
     path = tmp_path / "partial.h5"
 
@@ -52,7 +72,9 @@ def test_missing_trajectory_fails_and_removes_file(make_dataset, tmp_path):
     assert not path.exists()
 
 
-def test_exception_inside_context_removes_file(make_dataset, tmp_path):
+def test_exception_inside_context_removes_file(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
     dataset, _ = _streamed_copy(make_dataset(), "pressure")
     path = tmp_path / "aborted.h5"
 
@@ -62,7 +84,9 @@ def test_exception_inside_context_removes_file(make_dataset, tmp_path):
     assert not path.exists()
 
 
-def test_append_rejects_bad_shape_and_dtype(make_dataset, tmp_path):
+def test_append_rejects_bad_shape_and_dtype(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
     dataset, pressure = _streamed_copy(make_dataset(), "pressure")
     path = tmp_path / "checked.h5"
 
@@ -78,23 +102,27 @@ def test_append_rejects_bad_shape_and_dtype(make_dataset, tmp_path):
     assert not path.exists()
 
 
-def test_streamed_field_must_exist_and_be_sample_varying(make_dataset, tmp_path):
+def test_streamed_field_must_exist_and_be_sample_varying(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
     with pytest.raises(ValueError, match="not in dataset"):
         sds.DatasetWriter(make_dataset(), tmp_path / "x.h5", streamed=("nope",))
 
-    # "gravity" is the all-flags-False global constant in the fixture.
+    # "gravity" is the fixture's global constant: every flag off
     with pytest.raises(ValueError, match="must be sample_varying"):
         sds.DatasetWriter(make_dataset(), tmp_path / "x.h5", streamed=("gravity",))
 
 
-def test_update_normalization_lands_in_file(make_dataset, tmp_path):
+def test_update_normalization_lands_in_file(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
     dataset, pressure = _streamed_copy(make_dataset(), "pressure")
     path = tmp_path / "stats.h5"
 
     with sds.DatasetWriter(dataset, path, streamed=("pressure",)) as w:
         for i in range(pressure.shape[0]):
             w.append("pressure", i, pressure[i])
-        # Stats computed during the pass replace the placeholder entry on close.
+        # Statistics computed during the pass replace the fixture's entry on close
         w.update_normalization(
             "pressure",
             sds.Normalization(
@@ -113,9 +141,9 @@ def test_update_normalization_lands_in_file(make_dataset, tmp_path):
     np.testing.assert_allclose(loaded.min, pressure.min())
 
 
-def test_compression_spec_is_applied_and_roundtrips(make_dataset, tmp_path):
-    import h5py
-
+def test_compression_spec_is_applied_and_roundtrips(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
     spec = sds.Compression("gzip", level=1, shuffle=True)
     path = sds.write_dataset(make_dataset(), tmp_path / "filtered.h5", compression=spec)
 
@@ -132,8 +160,10 @@ def test_compression_spec_is_applied_and_roundtrips(make_dataset, tmp_path):
     )
 
 
-def test_write_dataset_still_roundtrips_via_writer(make_dataset, tmp_path):
-    # write_dataset is now the degenerate streamed=() case; a plain roundtrip stays intact.
+def test_write_dataset_still_roundtrips_via_writer(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
+    # write_dataset is the streamed=() case of the writer; a plain round trip stays intact
     original = make_dataset()
     loaded = sds.read_dataset(sds.write_dataset(original, tmp_path / "plain.h5"))
     assert loaded.present_fields == original.present_fields
