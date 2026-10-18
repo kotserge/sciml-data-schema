@@ -1,37 +1,23 @@
 # sciml-data-schema
 
-An HDF5 dataset format and metadata schema for PDE / physics simulation data,
-designed for scientific machine learning, based on the work of [The Well](https://github.com/PolymathicAI/the_well). 
-A single file holds one dataset of`n_trajectories` independent runs over a shared 
-spatial domain. The full design is in [`SCHEMA.md`](SCHEMA.md).
+An HDF5 dataset format and metadata schema for PDE and physics simulation data in
+scientific machine learning, after the data format of
+[The Well](https://github.com/PolymathicAI/the_well). One file holds one dataset of
+`n_trajectories` independent runs over a shared spatial domain. Every physical quantity
+(solution, forcing, coefficient, parameter) is a `Field` with a tensor order, a role and a
+unit, grouped on disk by tensor order; three extent flags say which of the trajectory, time
+and spatial axes its array carries, and an axis a field does not vary along is not stored.
+A field registry fixes the identity of every name across the files of a representation;
+each file lists the fields it holds and ships per-field normalization statistics and an
+optional provenance stamp.
 
-- `sciml_data_schema.schema` — the in-memory dataset representation (`Dataset`,
-  `Field`, `FieldSpec`, `Dimension`, `BoundaryCondition`, `Normalization`) and
-  the canonical HDF5 group/attribute names.
-- `sciml_data_schema.io` — `read_dataset` / `write_dataset` (the only module
-  that touches HDF5).
+![Overview: a producer builds a Dataset and writes it with write_dataset, or streams it with DatasetWriter; the file holds the root attributes, the dimensions, the boundary conditions, the normalization statistics and the t0/t1/t2 field groups; a consumer reads it with read_dataset and routes the fields by role; a field is an identity shared across files plus an extent per file](docs/figures/overview.png)
 
-## The unified field model
-
-Every physical quantity — solution, forcing, coefficient, parameter — is a
-`Field`. There is no separate "scalars" group: a "scalar parameter" is just a
-rank-0 field that doesn't vary in space or time. A field carries two orthogonal
-pieces of metadata:
-
-- **tensor order** (0/1/2) — selects the `t{order}_fields` group and fixes the
-  trailing tensor axes; together with **role** (`state` / `forcing` /
-  `coefficient` / `parameter` / `boundary`) and **unit** it forms the field's
-  registry identity (`FieldSpec`).
-- **extent flags** (`dim_varying` / `time_varying` / `sample_varying`) — an axis
-  along which a field does not vary is dropped, so the stored shape is
-  `(n_trajectories?, n_timesteps?, *spatial_shape?, *(n_spatial_dims,) * tensor_order)`
-  with each leading axis present only if its flag is set.
-
-A file also ships a `field_registry` (the canonical vocabulary, shared by
-convention across files of a representation), the `present_fields` it actually
-contains, and per-field `normalization` stats. The grid profile stores spatial
-coordinate vectors under `dimensions`. Train/val/test splits are left to
-downstream consumers rather than baked into the stored format.
+The package is the interface between a data-generation workspace and a training workspace
+(the layout of `sciml-template`, which installs it as an editable sibling): a producer
+builds a `Dataset` and writes it, a consumer reads it and routes the fields by role.
+`io.py` is the only module that touches HDF5. The format is specified in
+[`docs/SCHEMA.md`](docs/SCHEMA.md); `docs/figures/overview.py` redraws the figure.
 
 ## Installation
 
@@ -39,52 +25,125 @@ downstream consumers rather than baked into the stored format.
 pip install sciml-data-schema
 ```
 
-Or, from a checkout (uses [uv](https://docs.astral.sh/uv/)):
+Or, from a checkout, with [uv](https://docs.astral.sh/uv/) and
+[just](https://github.com/casey/just) (every recipe is a thin wrapper over `uv run`):
 
 ```bash
-uv sync --extra dev
+just sync            # uv sync --extra dev
+just test            # pytest, offline
+just check           # ruff check, ruff format --check, basedpyright
 ```
 
-Requires Python 3.11+. Runtime dependencies are `h5py` and `numpy`.
+Requires Python 3.11+; the runtime dependencies are `h5py` and `numpy`. A project that
+consumes the format from a checkout installs it as an editable path dependency
+(`sciml-data-schema = { path = "../sciml-data-schema", editable = true }` under
+`[tool.uv.sources]`).
 
 ## Usage
+
+Build a `Dataset`, write it, read it back:
 
 ```python
 import numpy as np
 import sciml_data_schema as sds
 
+rng = np.random.default_rng(0)
+n_trajectories, nx, ny = 16, 64, 64
+source = rng.standard_normal((n_trajectories, nx, ny)).astype(np.float32)
+u = rng.standard_normal((n_trajectories, nx, ny)).astype(np.float32)
+diffusivity = rng.uniform(0.5, 2.0, n_trajectories).astype(np.float32)
+
 dataset = sds.Dataset(
-    dataset_name="poisson_2d",
+    dataset_name="poisson",
     representation="grid",
     n_spatial_dims=2,
-    n_trajectories=1,
+    n_trajectories=n_trajectories,
     spatial_dims=["x", "y"],
     dimensions=[
-        sds.Dimension("x", np.linspace(0, 1, 32)),
-        sds.Dimension("y", np.linspace(0, 1, 32)),
+        sds.Dimension("x", np.linspace(0, 1, nx, dtype=np.float32)),
+        sds.Dimension("y", np.linspace(0, 1, ny, dtype=np.float32)),
     ],
     fields=[
-        sds.Field("u", np.zeros((1, 32, 32)), role="state", time_varying=False),
+        sds.Field("source", source, role="forcing", time_varying=False),   # (16, 64, 64)
+        sds.Field("u", u, role="state", time_varying=False),               # (16, 64, 64)
+        sds.Field(                                                         # (16,)
+            "diffusivity", diffusivity, role="parameter", unit="m^2/s",
+            dim_varying=False, time_varying=False,
+        ),
     ],
+    boundary_conditions=[
+        sds.BoundaryCondition(
+            "walls", "dirichlet", associated_fields=["u"], associated_dims=["x", "y"]
+        ),
+    ],
+    normalization={"u": sds.Normalization(mean=np.asarray(u.mean()), std=np.asarray(u.std()))},
+    provenance={"git_revision": sds.git_revision(".")},
 )
 
-sds.write_dataset(dataset, "run.h5", compression="gzip")
+sds.write_dataset(dataset, "poisson.h5", compression=sds.Compression("gzip", level=1, shuffle=True))
 
-ds = sds.read_dataset("run.h5")
-u = next(f for f in ds.fields if f.role == "state")
+loaded = sds.read_dataset("poisson.h5")
+targets = [f for f in loaded.fields if f.role == "state"]
+conditioning = [f for f in loaded.fields if f.role != "state"]
+dx = loaded.coords["x"][1] - loaded.coords["x"][0]
 ```
 
-`write_dataset` validates the dataset before touching disk, so a malformed
-dataset raises `ValueError` and leaves no file behind. See
-[`examples/advection_diffusion.py`](examples/advection_diffusion.py) for a
-complete, runnable scenario (build → write → read → role-routed window).
+`write_dataset` validates before touching the disk: a malformed dataset raises `ValueError`
+and leaves no file. `read_dataset` loads every field into memory and validates the result.
 
-## Development
+A dataset whose bulk fields do not fit in memory streams through `DatasetWriter`: give each
+streamed field `field_placeholder` data of its full shape, fill it one trajectory at a time,
+and set the statistics that are only known after the pass before the context closes:
 
-```bash
-uv sync --extra dev
-uv run pytest        # tests
-uv run ruff check    # lint
-uv run ruff format   # format
-uv run basedpyright  # type-check
+```python
+u = sds.Field("u", sds.field_placeholder((n_trajectories, nx, ny)), role="state", time_varying=False)
+dataset = sds.Dataset(..., fields=[u, ...])
+
+with sds.DatasetWriter(dataset, "poisson.h5", streamed=("u",)) as writer:
+    for trajectory in range(n_trajectories):
+        writer.append("u", trajectory, solve(trajectory))      # (nx, ny), float32
+    writer.update_normalization("u", sds.Normalization(mean=mean, std=std))
 ```
+
+Leaving the context verifies that every trajectory was written; on an exception, or a
+missing trajectory, the file is deleted.
+[`examples/advection_diffusion.py`](examples/advection_diffusion.py) is a complete scenario
+(build → write → read → role-routed window); `just example` runs it.
+
+### The public API
+
+| Name | What it is |
+|------|------------|
+| `Dataset` | one dataset: the root metadata, `dimensions`, `fields`, `boundary_conditions`, `normalization`, `field_registry`, `provenance`; `validate()`, `coords`, `present_fields` |
+| `Field` | a quantity: `name`, `data`, `tensor_order`, `role`, `unit`, the `dim_varying` / `time_varying` / `sample_varying` flags, `symmetric` / `antisymmetric` |
+| `FieldSpec` | a registry entry: `tensor_order`, `role`, `unit` |
+| `Dimension` | a coordinate axis: `name`, `coordinates` |
+| `BoundaryCondition` | `name`, `bc_type`, `associated_fields`, `associated_dims`, optional `mask` and `values` |
+| `Normalization` | per-field statistics: `mean`, `std`, optional `min`, `max` |
+| `Role`, `Representation`, `GridType`, `BCType` | the controlled vocabularies (`Literal` types) |
+| `write_dataset(dataset, path, *, mode, compression)` | validate and write in one call; returns the `Path` |
+| `DatasetWriter(dataset, path, *, streamed, mode, compression)` | the incremental writer: `append`, `update_normalization` |
+| `field_placeholder(shape, dtype)` | a zero-copy stand-in for a streamed field's data |
+| `read_dataset(path)` | load and validate a file |
+| `Compression(name, level, shuffle)` | the HDF5 filters; a bare filter name such as `"gzip"` is accepted too |
+| `git_revision(anchor)` | the short SHA of the checkout containing `anchor`, for the provenance stamp |
+| `SCHEMA_VERSION`, `REGISTRY_VERSION` | the layout and vocabulary versions a new `Dataset` carries |
+
+## Structure
+
+```
+src/sciml_data_schema/
+  schema.py        # Dataset, Field, FieldSpec, Dimension, BoundaryCondition, Normalization; the HDF5 names; validate()
+  io.py            # write_dataset, DatasetWriter, field_placeholder, read_dataset, Compression (the only h5py importer)
+  provenance.py    # git_revision
+  __init__.py      # the public API, re-exported from the package root
+tests/             # conftest.py builds a fixture with every tensor order and extent; round trips, validation, the writer, the example
+examples/          # advection_diffusion.py: build -> write -> read -> role-routed window
+docs/
+  SCHEMA.md        # the format: field model, registry, layout, profiles, contracts, versioning
+  figures/         # overview.py draws overview.png for this README
+  refactor/        # the planning trail (docs/<category>/<N>-<slug>/)
+justfile           # sync, test, check, format, figure, example
+```
+
+`CLAUDE.md` holds the conventions and the gates. The code is MIT-licensed (`LICENSE`).
