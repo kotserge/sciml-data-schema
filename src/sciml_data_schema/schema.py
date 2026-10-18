@@ -306,9 +306,7 @@ class Dataset:
         # n_spatial_dims=0 is the no-spatial-domain case (e.g. an ODE: a time axis
         # only). The upper bound is the schema's deliberate rank ceiling.
         if not 0 <= self.n_spatial_dims <= 3:
-            raise ValueError(
-                f"n_spatial_dims must be between 0 and 3, got {self.n_spatial_dims}"
-            )
+            raise ValueError(f"n_spatial_dims must be between 0 and 3, got {self.n_spatial_dims}")
         if len(self.spatial_dims) != self.n_spatial_dims:
             raise ValueError(
                 f"spatial_dims {self.spatial_dims} has {len(self.spatial_dims)} entries "
