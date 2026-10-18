@@ -1,15 +1,18 @@
-"""HDF5 read/write for :class:`sciml_data_schema.schema.Dataset`.
+"""HDF5 read and write of a :class:`~sciml_data_schema.schema.Dataset`.
 
-This is the only module that imports ``h5py``. Everything else works with the
-plain-Python objects from :mod:`sciml_data_schema.schema`, so the on-disk layout
-can change here without rippling through the codebase.
+The only module that imports ``h5py``. A file mirrors the schema's core layout: the root
+attributes (the versions, the name, ``representation`` and ``grid_type``, the counts, the
+``field_registry`` JSON, the ``present_fields`` list and the optional ``provenance`` JSON),
+the ``dimensions`` group (one coordinate dataset per axis and the ``spatial_dims``
+attribute), one group per boundary condition under ``boundary_conditions``, one group per
+field under ``normalization``, and the ``t0_fields``, ``t1_fields`` and ``t2_fields``
+groups holding the field datasets. A field dataset carries its extent flags (and, at rank
+2, its symmetry flags) as attributes; its tensor order, role and unit come from the
+registry.
 
-The file mirrors the schema's shared core layout: root attributes (versions,
-``representation``, the ``field_registry`` JSON, and the ``present_fields``
-list), a ``dimensions`` group (coordinate vectors + the ``spatial_dims``
-attribute), ``boundary_conditions``, ``normalization``, and the
-``t{0,1,2}_fields`` groups. Each field dataset carries its extent flags as
-attributes; its tensor order, role, and unit come from the registry.
+:func:`write_dataset` writes an in-memory dataset in one call; :class:`DatasetWriter`
+writes one whose bulk fields do not fit in memory, trajectory by trajectory;
+:func:`read_dataset` loads a file whole and validates it.
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import h5py
 import numpy as np
@@ -30,18 +33,26 @@ __all__ = ["write_dataset", "read_dataset", "Compression", "DatasetWriter", "fie
 
 StrPath = str | PathLike[str]
 
-# Variable-length UTF-8 string dtype for HDF5 string-array attributes.
+# The variable-length UTF-8 string dtype of the string-array attributes
 _STR = h5py.string_dtype("utf-8")
+
+# The dataset names inside a boundary condition's group
+_BC_MASK = "mask"
+_BC_VALUES = "values"
 
 
 @dataclass(frozen=True)
 class Compression:
-    """HDF5 storage filters applied to every field dataset.
+    """The HDF5 storage filters applied to every field and boundary-condition dataset.
 
-    ``level`` applies to gzip only. ``shuffle`` is the byte-shuffle filter, which
-    typically improves both ratio and speed on float data — e.g.
-    ``Compression("gzip", level=1, shuffle=True)`` beats plain gzip on all three of
-    size, read, and write throughput for smooth physical fields.
+    Attributes
+    ----------
+    name : str | None
+        The compression filter (``"gzip"``, ``"lzf"``, ...), or ``None`` for none.
+    level : int | None
+        The filter's level; gzip only, 0 to 9, ``None`` for h5py's default.
+    shuffle : bool
+        Whether the byte-shuffle filter runs before the compression filter.
     """
 
     name: str | None = None
@@ -49,7 +60,14 @@ class Compression:
     shuffle: bool = False
 
     def dataset_kwargs(self) -> dict[str, object]:
-        """The ``h5py.create_dataset`` keyword arguments this spec translates to."""
+        """The ``h5py.Group.create_dataset`` keyword arguments of this spec.
+
+        Returns
+        -------
+        dict[str, object]
+            ``shuffle`` always; ``compression`` when ``name`` is set; ``compression_opts``
+            when ``level`` is set too.
+        """
         kwargs: dict[str, object] = {"shuffle": self.shuffle}
         if self.name is not None:
             kwargs["compression"] = self.name
@@ -58,11 +76,12 @@ class Compression:
         return kwargs
 
 
+# The accepted spellings of a compression setting: nothing, a filter name, or a full spec
 CompressionLike = str | Compression | None
 
 
 def _as_compression(value: CompressionLike) -> Compression:
-    """Normalize the accepted forms (``None``, a filter name, a full spec)."""
+    """The :class:`Compression` of a ``CompressionLike`` value."""
     if value is None:
         return Compression()
     if isinstance(value, str):
@@ -77,12 +96,33 @@ def write_dataset(
     mode: str = "w",
     compression: CompressionLike = None,
 ) -> Path:
-    """Validate ``dataset`` and write it to ``path`` as a single HDF5 file.
+    """Validate ``dataset`` and write it to ``path`` as one HDF5 file.
 
-    ``compression`` is a filter name (e.g. ``"gzip"``), a :class:`Compression`
-    spec, or ``None`` for uncompressed. This is the degenerate all-inline case of
-    :class:`DatasetWriter` -- use that directly when a dataset's bulk fields do
-    not fit in memory.
+    Parameters
+    ----------
+    dataset : s.Dataset
+        The dataset, with every field's data in memory.
+    path : StrPath
+        The file to write.
+    mode : str
+        The ``h5py.File`` mode; ``"w"`` truncates an existing file.
+    compression : CompressionLike
+        A filter name (``"gzip"``), a :class:`Compression` spec, or ``None`` for none.
+
+    Returns
+    -------
+    Path
+        ``path`` as a :class:`~pathlib.Path`.
+
+    Raises
+    ------
+    ValueError
+        The dataset fails :meth:`~sciml_data_schema.schema.Dataset.validate`; no file is
+        created.
+
+    Notes
+    -----
+    Equivalent to a :class:`DatasetWriter` with no streamed fields.
     """
     with DatasetWriter(dataset, path, streamed=(), mode=mode, compression=compression):
         pass
@@ -90,11 +130,20 @@ def write_dataset(
 
 
 def field_placeholder(shape: tuple[int, ...], dtype: np.dtype | type = np.float32) -> np.ndarray:
-    """Zero-copy stand-in for a streamed field's ``data``.
+    """A zero-copy stand-in for the ``data`` of a field :class:`DatasetWriter` streams.
 
-    Gives a :class:`~sciml_data_schema.schema.Field` the shape and dtype the
-    validator needs without allocating the array; the values are never written.
-    Use it for the fields named in :class:`DatasetWriter`'s ``streamed``.
+    Parameters
+    ----------
+    shape : tuple[int, ...]
+        The field's full stored shape, leading trajectory axis included.
+    dtype : np.dtype | type
+        The field's dtype.
+
+    Returns
+    -------
+    np.ndarray
+        A read-only broadcast view of one zero with the given shape and dtype; nothing of
+        size ``shape`` is allocated, and the values are never written.
     """
     return np.broadcast_to(np.zeros((), dtype=dtype), shape)
 
@@ -102,16 +151,43 @@ def field_placeholder(shape: tuple[int, ...], dtype: np.dtype | type = np.float3
 class DatasetWriter:
     """Write a dataset whose bulk fields exceed memory, one trajectory at a time.
 
-    Construct with a complete :class:`~sciml_data_schema.schema.Dataset` in which
-    each field named in ``streamed`` carries :func:`field_placeholder` data (any
-    streamed field must be ``sample_varying`` -- the leading trajectory axis is what
-    :meth:`append` fills). On entering the context, the root metadata, dimensions,
-    boundary conditions, normalization, and every non-streamed field are written,
-    and each streamed field's HDF5 dataset is created at full shape, chunked by
-    trajectory (and timestep, if present). Leaving the context verifies that every
-    trajectory of every streamed field was written. On any failure -- an exception
-    inside the block, or missing trajectories -- the file is deleted, so a partial
-    write never leaves a valid-looking file behind.
+    Entering the context writes the root metadata, the dimensions, the boundary conditions
+    and every non-streamed field, and creates each streamed field's dataset at full shape,
+    chunked by trajectory (and by timestep when the field has a time axis).
+    :meth:`append` fills one trajectory of one streamed field; :meth:`update_normalization`
+    sets a field's statistics. Leaving the context checks that every trajectory of every
+    streamed field was written, writes the normalization group and closes the file. On an
+    exception inside the block, or on a missing trajectory, the file is deleted.
+
+    Parameters
+    ----------
+    dataset : s.Dataset
+        The complete dataset; each field named in ``streamed`` carries
+        :func:`field_placeholder` data of its full stored shape and dtype.
+    path : StrPath
+        The file to write.
+    streamed : tuple[str, ...] | list[str]
+        The fields filled through :meth:`append`; each must be ``sample_varying``.
+    mode : str
+        The ``h5py.File`` mode; ``"w"`` truncates an existing file.
+    compression : CompressionLike
+        A filter name, a :class:`Compression` spec, or ``None`` for none.
+
+    Raises
+    ------
+    ValueError
+        The dataset fails :meth:`~sciml_data_schema.schema.Dataset.validate`; a streamed name
+        is not a field of the dataset; a streamed field is not ``sample_varying``. Raised by
+        the constructor, before any file is created.
+
+    Examples
+    --------
+    ::
+
+        with DatasetWriter(dataset, "run.h5", streamed=("u",)) as writer:
+            for trajectory in range(dataset.n_trajectories):
+                writer.append("u", trajectory, solve(trajectory))
+            writer.update_normalization("u", Normalization(mean=mean, std=std))
     """
 
     def __init__(
@@ -123,10 +199,10 @@ class DatasetWriter:
         mode: str = "w",
         compression: CompressionLike = None,
     ) -> None:
-        # Validate before touching the disk, mirroring write_dataset's contract.
+        # Validate before any file exists
         dataset.validate()
 
-        # Streamed names must exist and have a leading trajectory axis to append along.
+        # Every streamed name is a field with a leading trajectory axis to fill along
         fields_by_name = {fld.name: fld for fld in dataset.fields}
         unknown = set(streamed) - set(fields_by_name)
         if unknown:
@@ -143,16 +219,15 @@ class DatasetWriter:
         self._file: h5py.File | None = None
         self._targets: dict[str, h5py.Dataset] = {}
         self._written: dict[str, np.ndarray] = {}
-        # Normalization is deferred to close: stats of streamed fields are typically
-        # only known after the pass, so producers may update entries mid-stream.
+        # The statistics written on close; `update_normalization` replaces entries until then
         self._normalization = dict(dataset.normalization)
 
     def __enter__(self) -> DatasetWriter:
         dataset = self._dataset
         registry = dataset.effective_registry()
 
-        # Write everything except the streamed bulk (and the normalization, which is
-        # written on close); abort cleanly on any failure so no partial file survives.
+        # Write everything but the streamed bulk and the normalization; on a failure, delete the
+        # partial file and re-raise
         self._file = f = h5py.File(self._path, self._mode)
         try:
             _write_root_attrs(f, dataset, registry)
@@ -165,18 +240,42 @@ class DatasetWriter:
             self._abort()
             raise
 
+        # One flag per trajectory of each streamed field, set by `append`
         self._written = {
             name: np.zeros(self._targets[name].shape[0], dtype=bool) for name in self._streamed
         }
         return self
 
     def append(self, name: str, trajectory: int, data: np.ndarray) -> None:
-        """Write one trajectory's slice of streamed field ``name``, shape/dtype-checked."""
+        """Write one trajectory of a streamed field.
+
+        Parameters
+        ----------
+        name : str
+            A field named in ``streamed``.
+        trajectory : int
+            The trajectory index, ``0 <= trajectory < n_trajectories``.
+        data : np.ndarray
+            The trajectory's values: the field's stored shape without the leading axis, in
+            the field's dtype.
+
+        Raises
+        ------
+        RuntimeError
+            The writer is not inside its context.
+        KeyError
+            ``name`` is not a streamed field.
+        IndexError
+            ``trajectory`` is outside the field's trajectory axis.
+        ValueError
+            ``data`` has another shape or dtype than the field.
+        """
         if self._file is None:
             raise RuntimeError("DatasetWriter used outside its context")
         if name not in self._targets:
             raise KeyError(f"not a streamed field: {name!r}")
 
+        # The slice fits the target exactly: index, shape and dtype
         target = self._targets[name]
         if not 0 <= trajectory < target.shape[0]:
             raise IndexError(
@@ -198,8 +297,21 @@ class DatasetWriter:
         self._written[name][trajectory] = True
 
     def update_normalization(self, name: str, normalization: s.Normalization) -> None:
-        """Set/replace field ``name``'s statistics before close — the home for stats
-        that are only known after streaming (e.g. an online mean/std over the pass).
+        """Set or replace a field's statistics before the file is closed.
+
+        Parameters
+        ----------
+        name : str
+            A present field of the dataset.
+        normalization : s.Normalization
+            The statistics written for it on close.
+
+        Raises
+        ------
+        RuntimeError
+            The writer is not inside its context.
+        ValueError
+            ``name`` is not a field of the dataset.
         """
         if self._file is None:
             raise RuntimeError("DatasetWriter used outside its context")
@@ -208,11 +320,12 @@ class DatasetWriter:
         self._normalization[name] = normalization
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
-        # An exception inside the block wins; drop the partial file and re-raise.
+        # An exception inside the block: delete the partial file and let it propagate
         if exc_type is not None:
             self._abort()
             return False
 
+        # Every trajectory of every streamed field was written
         missing = {
             name: int((~mask).sum()) for name, mask in self._written.items() if not mask.all()
         }
@@ -220,6 +333,7 @@ class DatasetWriter:
             self._abort()
             raise ValueError(f"incomplete streamed fields (missing trajectories): {missing}")
 
+        # The statistics go last, then the file is complete
         assert self._file is not None
         _write_normalization(self._file, self._normalization)
         self._file.close()
@@ -227,14 +341,18 @@ class DatasetWriter:
         return False
 
     def _abort(self) -> None:
-        """Close the handle and remove the partial file."""
+        """Close the file handle and delete the file at ``path``."""
         if self._file is not None:
             self._file.close()
             self._file = None
         self._path.unlink(missing_ok=True)
 
 
+# === Group writers ===
+
+
 def _write_root_attrs(f: h5py.File, dataset: s.Dataset, registry: dict[str, s.FieldSpec]) -> None:
+    """Write the root attributes; ``provenance`` only when the dataset carries one."""
     f.attrs[s.ATTR_SCHEMA_VERSION] = dataset.schema_version
     f.attrs[s.ATTR_REGISTRY_VERSION] = dataset.registry_version
     f.attrs[s.ATTR_DATASET_NAME] = dataset.dataset_name
@@ -248,42 +366,8 @@ def _write_root_attrs(f: h5py.File, dataset: s.Dataset, registry: dict[str, s.Fi
         f.attrs[s.ATTR_PROVENANCE] = json.dumps(dataset.provenance)
 
 
-def read_dataset(path: StrPath) -> s.Dataset:
-    """Load an HDF5 file written by :func:`write_dataset` back into a :class:`Dataset`."""
-    with h5py.File(Path(path), "r") as f:
-        registry = s.registry_from_json(_as_str(f.attrs[s.ATTR_FIELD_REGISTRY]))
-        present = _as_str_list(f.attrs[s.ATTR_PRESENT_FIELDS])
-        dataset = s.Dataset(
-            dataset_name=_as_str(f.attrs[s.ATTR_DATASET_NAME]),
-            representation=cast(s.Representation, _as_str(f.attrs[s.ATTR_REPRESENTATION])),
-            grid_type=cast(s.GridType, _as_str(f.attrs.get(s.ATTR_GRID_TYPE, "cartesian"))),
-            n_spatial_dims=_as_int(f.attrs[s.ATTR_N_SPATIAL_DIMS]),
-            n_trajectories=_as_int(f.attrs[s.ATTR_N_TRAJECTORIES]),
-            spatial_dims=_read_spatial_dims(f),
-            schema_version=_as_str(f.attrs[s.ATTR_SCHEMA_VERSION]),
-            registry_version=_as_str(f.attrs[s.ATTR_REGISTRY_VERSION]),
-            dimensions=_read_dimensions(f),
-            fields=_read_fields(f, registry, present),
-            boundary_conditions=_read_boundary_conditions(f),
-            normalization=_read_normalization(f),
-            field_registry=registry,
-            provenance=_read_provenance(f),
-        )
-    dataset.validate()
-    return dataset
-
-
-def _read_provenance(f: h5py.File) -> dict[str, str]:
-    """Read the optional free-form provenance object (absent in older files)."""
-    if s.ATTR_PROVENANCE not in f.attrs:
-        return {}
-    return json.loads(_as_str(f.attrs[s.ATTR_PROVENANCE]))
-
-
-# --- group writers ------------------------------------------------------------
-
-
 def _write_dimensions(f: h5py.File, dimensions: list[s.Dimension], spatial_dims: list[str]) -> None:
+    """Write the ``dimensions`` group: the ``spatial_dims`` attribute and one dataset per axis."""
     grp = f.create_group(s.GROUP_DIMENSIONS)
     grp.attrs[s.ATTR_SPATIAL_DIMS] = _str_array(spatial_dims)
     for dim in dimensions:
@@ -293,6 +377,11 @@ def _write_dimensions(f: h5py.File, dimensions: list[s.Dimension], spatial_dims:
 def _write_boundary_conditions(
     f: h5py.File, bcs: list[s.BoundaryCondition], compression: Compression
 ) -> None:
+    """Write the ``boundary_conditions`` group, one subgroup per condition.
+
+    A subgroup holds the condition's attributes and its optional ``mask`` and ``values``
+    datasets.
+    """
     grp = f.create_group(s.GROUP_BOUNDARY_CONDITIONS)
     for bc in bcs:
         sub = grp.create_group(bc.name)
@@ -300,18 +389,23 @@ def _write_boundary_conditions(
         sub.attrs[s.ATTR_ASSOCIATED_FIELDS] = _str_array(bc.associated_fields)
         sub.attrs[s.ATTR_ASSOCIATED_DIMS] = _str_array(bc.associated_dims)
         if bc.mask is not None:
-            sub.create_dataset("mask", data=np.asarray(bc.mask), **compression.dataset_kwargs())
+            sub.create_dataset(_BC_MASK, data=np.asarray(bc.mask), **compression.dataset_kwargs())
         if bc.values is not None:
-            sub.create_dataset("values", data=np.asarray(bc.values), **compression.dataset_kwargs())
+            sub.create_dataset(
+                _BC_VALUES, data=np.asarray(bc.values), **compression.dataset_kwargs()
+            )
 
 
 def _write_normalization(f: h5py.File, normalization: dict[str, s.Normalization]) -> None:
+    """Write the ``normalization`` group, one subgroup per field holding its statistics.
+
+    ``mean`` and ``std`` are always written, ``min`` and ``max`` when the entry has them.
+    """
     grp = f.create_group(s.GROUP_NORMALIZATION)
     for name, norm in normalization.items():
         sub = grp.create_group(name)
         sub.attrs[s.ATTR_MEAN] = np.asarray(norm.mean)
         sub.attrs[s.ATTR_STD] = np.asarray(norm.std)
-        # Range stats are optional (schema >= 0.3.0); absent attrs read back as None.
         if norm.min is not None:
             sub.attrs[s.ATTR_MIN] = np.asarray(norm.min)
         if norm.max is not None:
@@ -319,8 +413,10 @@ def _write_normalization(f: h5py.File, normalization: dict[str, s.Normalization]
 
 
 def _stream_chunks(fld: s.Field, shape: tuple[int, ...]) -> tuple[int, ...]:
-    """Chunk layout for a streamed field: one (trajectory, timestep) slab per chunk
-    when a time axis exists, one trajectory otherwise -- matching how loaders read.
+    """The chunk shape of a streamed field.
+
+    One (trajectory, timestep) slab per chunk when the field has a time axis, one trajectory
+    otherwise.
     """
     if fld.time_varying and len(shape) >= 2:
         return (1, 1, *shape[2:])
@@ -334,10 +430,12 @@ def _write_fields(
     *,
     streamed: frozenset[str] = frozenset(),
 ) -> dict[str, h5py.Dataset]:
-    """Write all field datasets; ``streamed`` ones are created empty at full shape
-    (their placeholder data ignored) and returned for trajectory-wise filling.
+    """Write the three field groups and every field dataset with its flag attributes.
+
+    A streamed field's dataset is created at full shape without data (its placeholder is not
+    read) and returned for trajectory-wise filling. Every field group exists afterwards, empty
+    or not.
     """
-    # Create every field group up front so readers can rely on their presence.
     groups = {order: f.create_group(name) for order, name in s.FIELD_GROUPS.items()}
 
     targets: dict[str, h5py.Dataset] = {}
@@ -364,13 +462,63 @@ def _write_fields(
     return targets
 
 
-# --- group readers ------------------------------------------------------------
-# h5py's get/__getitem__ are typed as unions over groups, datasets, datatypes and
-# links. Narrow them explicitly so the type checker is satisfied and malformed
-# files (a name present but of the wrong kind) fail with a clear error.
+# === Reader ===
+
+
+def read_dataset(path: StrPath) -> s.Dataset:
+    """Load an HDF5 file written by :func:`write_dataset` or :class:`DatasetWriter`.
+
+    Every field's data is read into memory. A file without a ``grid_type`` attribute reads
+    as ``"cartesian"``; one without ``provenance`` reads as an empty mapping.
+
+    Parameters
+    ----------
+    path : StrPath
+        The file to read.
+
+    Returns
+    -------
+    s.Dataset
+        The dataset, validated.
+
+    Raises
+    ------
+    ValueError
+        A present field has no registry entry or no dataset in its tensor order's group, or
+        the loaded dataset fails :meth:`~sciml_data_schema.schema.Dataset.validate`.
+    TypeError
+        A name in the file is an HDF5 object of another kind than the layout prescribes.
+    """
+    with h5py.File(Path(path), "r") as f:
+        registry = s.registry_from_json(_as_str(f.attrs[s.ATTR_FIELD_REGISTRY]))
+        present = _as_str_list(f.attrs[s.ATTR_PRESENT_FIELDS])
+        dataset = s.Dataset(
+            dataset_name=_as_str(f.attrs[s.ATTR_DATASET_NAME]),
+            representation=cast(s.Representation, _as_str(f.attrs[s.ATTR_REPRESENTATION])),
+            grid_type=cast(s.GridType, _as_str(f.attrs.get(s.ATTR_GRID_TYPE, "cartesian"))),
+            n_spatial_dims=_as_int(f.attrs[s.ATTR_N_SPATIAL_DIMS]),
+            n_trajectories=_as_int(f.attrs[s.ATTR_N_TRAJECTORIES]),
+            spatial_dims=_read_spatial_dims(f),
+            schema_version=_as_str(f.attrs[s.ATTR_SCHEMA_VERSION]),
+            registry_version=_as_str(f.attrs[s.ATTR_REGISTRY_VERSION]),
+            dimensions=_read_dimensions(f),
+            fields=_read_fields(f, registry, present),
+            boundary_conditions=_read_boundary_conditions(f),
+            normalization=_read_normalization(f),
+            field_registry=registry,
+            provenance=_read_provenance(f),
+        )
+    dataset.validate()
+    return dataset
+
+
+# === Group readers ===
+# h5py's `get` returns a union over groups, datasets, datatypes and links; these narrow it to the
+# kind the layout prescribes and raise TypeError on any other.
 
 
 def _open_group(parent: h5py.Group, name: str) -> h5py.Group | None:
+    """The group ``name`` under ``parent``, or ``None`` when absent."""
     obj = parent.get(name)
     if obj is None:
         return None
@@ -380,6 +528,7 @@ def _open_group(parent: h5py.Group, name: str) -> h5py.Group | None:
 
 
 def _require_dataset(grp: h5py.Group, name: str) -> h5py.Dataset:
+    """The dataset ``name`` under ``grp``."""
     obj = grp.get(name)
     if not isinstance(obj, h5py.Dataset):
         raise TypeError(f"expected {name!r} to be an HDF5 dataset, got {type(obj).__name__}")
@@ -387,13 +536,22 @@ def _require_dataset(grp: h5py.Group, name: str) -> h5py.Dataset:
 
 
 def _datasets(grp: h5py.Group) -> Iterator[tuple[str, h5py.Dataset]]:
+    """Every member of ``grp`` as ``(name, dataset)``."""
     for name, obj in grp.items():
         if not isinstance(obj, h5py.Dataset):
             raise TypeError(f"expected {name!r} to be an HDF5 dataset, got {type(obj).__name__}")
         yield name, obj
 
 
+def _read_provenance(f: h5py.File) -> dict[str, str]:
+    """The ``provenance`` attribute as a mapping; empty when the attribute is absent."""
+    if s.ATTR_PROVENANCE not in f.attrs:
+        return {}
+    return json.loads(_as_str(f.attrs[s.ATTR_PROVENANCE]))
+
+
 def _read_spatial_dims(f: h5py.File) -> list[str]:
+    """The ``spatial_dims`` attribute of the ``dimensions`` group; empty when absent."""
     grp = _open_group(f, s.GROUP_DIMENSIONS)
     if grp is None:
         return []
@@ -401,6 +559,7 @@ def _read_spatial_dims(f: h5py.File) -> list[str]:
 
 
 def _read_dimensions(f: h5py.File) -> list[s.Dimension]:
+    """One :class:`~sciml_data_schema.schema.Dimension` per dataset of the ``dimensions`` group."""
     grp = _open_group(f, s.GROUP_DIMENSIONS)
     if grp is None:
         return []
@@ -408,6 +567,7 @@ def _read_dimensions(f: h5py.File) -> list[s.Dimension]:
 
 
 def _read_boundary_conditions(f: h5py.File) -> list[s.BoundaryCondition]:
+    """One ``BoundaryCondition`` per subgroup of ``boundary_conditions``."""
     grp = _open_group(f, s.GROUP_BOUNDARY_CONDITIONS)
     if grp is None:
         return []
@@ -415,8 +575,8 @@ def _read_boundary_conditions(f: h5py.File) -> list[s.BoundaryCondition]:
     for name, obj in grp.items():
         if not isinstance(obj, h5py.Group):
             raise TypeError(f"boundary condition {name!r} must be an HDF5 group")
-        mask = obj.get("mask")
-        values = obj.get("values")
+        mask = obj.get(_BC_MASK)
+        values = obj.get(_BC_VALUES)
         bcs.append(
             s.BoundaryCondition(
                 name=name,
@@ -431,6 +591,10 @@ def _read_boundary_conditions(f: h5py.File) -> list[s.BoundaryCondition]:
 
 
 def _read_normalization(f: h5py.File) -> dict[str, s.Normalization]:
+    """One ``Normalization`` per subgroup of ``normalization``.
+
+    ``min`` and ``max`` are ``None`` when their attributes are absent.
+    """
     grp = _open_group(f, s.GROUP_NORMALIZATION)
     if grp is None:
         return {}
@@ -452,6 +616,10 @@ def _read_normalization(f: h5py.File) -> dict[str, s.Normalization]:
 def _read_fields(
     f: h5py.File, registry: dict[str, s.FieldSpec], present: list[str]
 ) -> list[s.Field]:
+    """One ``Field`` per present name.
+
+    The identity comes from the registry entry, the flags from the dataset's attributes.
+    """
     fields: list[s.Field] = []
     for name in present:
         spec = registry.get(name)
@@ -478,28 +646,33 @@ def _read_fields(
     return fields
 
 
-# --- attribute encoding/decoding ----------------------------------------------
-# h5py returns bytes for legacy string attrs and numpy scalars for bool/int;
-# normalize them to plain Python types on the way out.
+# === Attribute encoding and decoding ===
+# h5py returns bytes for legacy string attributes and numpy scalars for bool and int ones; these
+# convert them to plain Python values.
 
 
 def _str_array(values: list[str]) -> np.ndarray:
+    """``values`` as a variable-length UTF-8 string array, the form of a string-list attribute."""
     return np.array(list(values), dtype=_STR)
 
 
-def _as_str(value) -> str:
+def _as_str(value: Any) -> str:
+    """A string attribute value (``str`` or ``bytes``) as ``str``."""
     if isinstance(value, bytes):
         return value.decode("utf-8")
     return str(value)
 
 
-def _as_str_list(value) -> list[str]:
+def _as_str_list(value: Any) -> list[str]:
+    """A string-array attribute value as a list of ``str``; a scalar becomes a one-item list."""
     return [_as_str(v) for v in np.atleast_1d(value)]
 
 
-def _as_bool(value) -> bool:
+def _as_bool(value: Any) -> bool:
+    """A bool attribute value (a numpy scalar) as ``bool``."""
     return bool(value)
 
 
-def _as_int(value) -> int:
+def _as_int(value: Any) -> int:
+    """An int attribute value (a numpy scalar) as ``int``."""
     return int(value)

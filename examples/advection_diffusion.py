@@ -1,33 +1,44 @@
-"""Build, write, and read a 1+1D advection-diffusion dataset via the library.
+"""Build, write and read a 1+1D advection-diffusion dataset through the public API.
 
-PDE (periodic on ``[0, L)``)::
+The PDE, periodic on ``[0, L)``::
 
     u_t + a u_x = D u_xx
 
-    u : scalar solution      -> state field      (t0)
-    a : advection speed      -> scalar parameter  (t0, degenerate)
-    D : diffusion coefficient -> scalar parameter  (t0, degenerate)
+    u : the solution              -> a state field,     t0, varying in sample, time and space
+    a : the advection speed       -> a parameter field, t0, one value per trajectory
+    D : the diffusion coefficient -> a parameter field, t0, one value per trajectory
 
-This is the simplest case that exercises the *unified field model*: ``u``, ``a``,
-and ``D`` all live in ``t0_fields`` (tensor order 0) and are distinguished only
-by ``role`` plus extent flags -- there is no separate "scalars" group. ``a`` and
-``D`` are *degenerate* fields (``dim_varying=False``, ``time_varying=False``),
-stored as one value per trajectory.
+All three live in ``t0_fields`` and differ by role and extent flags: ``advection`` and
+``diffusion`` have ``dim_varying=False`` and ``time_varying=False``, so they are stored as
+``(n_trajectories,)``. :func:`build_dataset` assembles the dataset in memory,
+:func:`windowed_training_view` routes its fields by role into one training window, and
+:func:`main` writes the file with :func:`sciml_data_schema.write_dataset`, reads it back with
+:func:`sciml_data_schema.read_dataset` and prints both.
 
-Every byte goes through the public API: :func:`sciml_data_schema.write_dataset`
-and :func:`sciml_data_schema.read_dataset`. Run it directly to generate a file,
-read it back, and print a role-routed training window::
+Examples
+--------
+::
 
-    python examples/advection_diffusion.py
+    python examples/advection_diffusion.py    # writes advection_diffusion_1d.h5 here
 """
 
 from __future__ import annotations
 
+import os
 from typing import NamedTuple
 
 import numpy as np
 
 import sciml_data_schema as sds
+
+# The file `main` writes, in the current directory
+OUTPUT_PATH = "advection_diffusion_1d.h5"
+
+# The field names, and the order of the parameters in a window's conditioning vector
+FIELD_STATE = "u"
+FIELD_ADVECTION = "advection"
+FIELD_DIFFUSION = "diffusion"
+PARAMETER_FIELDS = (FIELD_ADVECTION, FIELD_DIFFUSION)
 
 
 def build_dataset(
@@ -42,30 +53,61 @@ def build_dataset(
     n_modes: int = 6,
     seed0: int = 0,
 ) -> sds.Dataset:
-    """Build an advection-diffusion :class:`~sciml_data_schema.Dataset` in memory.
+    """Build the advection-diffusion dataset in memory.
 
-    Trajectories = ``advections x diffusions x seeds``. The seed sets a smooth
-    low-mode initial condition; the same IC is evolved under every ``(a, D)``
-    pair. Each periodic mode evolves exactly,
+    One trajectory per ``(a, D, seed)`` combination. The seed draws a smooth initial condition
+    of ``n_modes`` random Fourier modes, scaled to unit peak; the same initial condition is
+    evolved under every ``(a, D)`` pair. Each mode evolves exactly,
     ``u_hat_k(t) = u_hat_k(0) * exp((-i a k - D k^2) t)``, so the data carries no
     time-discretization error.
+
+    Parameters
+    ----------
+    length : float
+        The domain length ``L``.
+    n_points : int
+        Grid points along ``x``.
+    n_steps : int
+        Time steps, ``t = 0`` included.
+    t_final : float
+        The final time.
+    advections : tuple[float, ...]
+        The advection speeds ``a`` swept.
+    diffusions : tuple[float, ...]
+        The diffusion coefficients ``D`` swept.
+    n_seeds : int
+        Initial conditions per ``(a, D)`` pair.
+    n_modes : int
+        Fourier modes in an initial condition.
+    seed0 : int
+        The seed of the first initial condition; seed ``s`` uses ``seed0 + s``.
+
+    Returns
+    -------
+    sds.Dataset
+        A 1D grid dataset of ``len(advections) * len(diffusions) * n_seeds`` trajectories:
+        ``u`` ``(n_trajectories, n_steps, n_points)``, ``advection`` and ``diffusion``
+        ``(n_trajectories,)``, all float32, with z-score statistics per field and a periodic
+        boundary condition on ``u`` along ``x``.
     """
     combos = [(a, d, s) for a in advections for d in diffusions for s in range(n_seeds)]
     n_traj = len(combos)
 
+    # The grid, the times and the angular wavenumbers of the periodic modes
     dx = length / n_points
     x = np.arange(n_points) * dx
     times = np.linspace(0.0, t_final, n_steps)
-    k = np.fft.fftfreq(n_points, d=dx) * 2.0 * np.pi  # angular wavenumbers
+    k = np.fft.fftfreq(n_points, d=dx) * 2.0 * np.pi
 
     u = np.empty((n_traj, n_steps, n_points), dtype=np.float32)
     a_arr = np.empty((n_traj,), dtype=np.float32)
     d_arr = np.empty((n_traj,), dtype=np.float32)
 
+    # Each trajectory: a smooth low-mode initial condition, evolved exactly in Fourier space
     for i, (a, d, s) in enumerate(combos):
         rng = np.random.default_rng(seed0 + s)
         u0 = np.zeros(n_points)
-        for n in range(1, n_modes + 1):  # smooth low-mode IC
+        for n in range(1, n_modes + 1):
             u0 += rng.normal() * np.cos(2 * np.pi * n * x / length)
             u0 += rng.normal() * np.sin(2 * np.pi * n * x / length)
         u0 /= np.max(np.abs(u0)) + 1e-12
@@ -76,12 +118,11 @@ def build_dataset(
             u[i, j] = np.fft.ifft(u0_hat * propagator).real
         a_arr[i], d_arr[i] = a, d
 
+    # The solution varies along every axis; the parameters only across trajectories
     fields = [
-        # Solution: varies across trajectories, time, and space.
-        sds.Field(name="u", data=u, tensor_order=0, role="state"),
-        # Scalar parameters: one value per trajectory, broadcast on read.
+        sds.Field(name=FIELD_STATE, data=u, tensor_order=0, role="state"),
         sds.Field(
-            name="advection",
+            name=FIELD_ADVECTION,
             data=a_arr,
             tensor_order=0,
             role="parameter",
@@ -90,7 +131,7 @@ def build_dataset(
             time_varying=False,
         ),
         sds.Field(
-            name="diffusion",
+            name=FIELD_DIFFUSION,
             data=d_arr,
             tensor_order=0,
             role="parameter",
@@ -121,7 +162,7 @@ def build_dataset(
             sds.BoundaryCondition(
                 name="periodic",
                 bc_type="periodic",
-                associated_fields=["u"],
+                associated_fields=[FIELD_STATE],
                 associated_dims=["x"],
             )
         ],
@@ -130,52 +171,76 @@ def build_dataset(
 
 
 class TrainingWindow(NamedTuple):
-    """One model input/target window plus the trajectory's conditioning params."""
+    """One model input/target window of a trajectory plus its conditioning parameters.
 
-    input: np.ndarray  # (n_in, n_points)  past states
-    target: np.ndarray  # (n_out, n_points) future states (prediction target)
-    params: np.ndarray  # (n_params,)       scalar conditioning values
+    Attributes
+    ----------
+    input : np.ndarray
+        ``(n_in, n_points)``, the past states.
+    target : np.ndarray
+        ``(n_out, n_points)``, the future states (the prediction target).
+    params : np.ndarray
+        ``(n_params,)``, the trajectory's scalar parameters.
+    param_names : list[str]
+        The field name of each entry of ``params``.
+    """
+
+    input: np.ndarray
+    target: np.ndarray
+    params: np.ndarray
     param_names: list[str]
 
 
 def windowed_training_view(
     dataset: sds.Dataset, *, n_in: int = 4, n_out: int = 1
 ) -> TrainingWindow:
-    """Routing demo: split one trajectory into a model input/target window.
+    """Route the first trajectory's fields by role into one training window.
 
-    ``role`` is the bridge between PDE meaning and storage: ``state`` fields are
-    prediction targets, everything else is conditioning. Here we take the first
-    trajectory, window ``u`` into past (input) and future (target) frames, and
-    collect the scalar parameters as a conditioning vector -- the role-based
-    routing a downstream loader would perform, in plain NumPy.
+    The ``state`` field is windowed into ``n_in`` input frames followed by ``n_out`` target
+    frames; the ``parameter`` fields become the conditioning vector.
+
+    Parameters
+    ----------
+    dataset : sds.Dataset
+        A dataset built by :func:`build_dataset` or read back from its file.
+    n_in : int
+        Input frames.
+    n_out : int
+        Target frames, taken right after the input frames.
+
+    Returns
+    -------
+    TrainingWindow
+        The window of trajectory 0.
+
+    Raises
+    ------
+    KeyError
+        The dataset lacks ``u``, ``advection`` or ``diffusion``.
     """
     by_name = {f.name: f for f in dataset.fields}
 
-    u = by_name["u"].data[0]  # (n_steps, n_points) for trajectory 0
+    # The state of trajectory 0, (n_steps, n_points), split into past and future frames
+    u = by_name[FIELD_STATE].data[0]
     state_in = u[:n_in]
     state_out = u[n_in : n_in + n_out]
 
-    params = np.array(
-        [float(by_name[name].data[0]) for name in ("advection", "diffusion")],
-        dtype=np.float32,
-    )
+    params = np.array([float(by_name[name].data[0]) for name in PARAMETER_FIELDS], dtype=np.float32)
     return TrainingWindow(
         input=state_in,
         target=state_out,
         params=params,
-        param_names=["advection", "diffusion"],
+        param_names=list(PARAMETER_FIELDS),
     )
 
 
 def main() -> None:
-    import os
-
-    path = "advection_diffusion_1d.h5"
+    """Write the dataset to ``OUTPUT_PATH``, read it back and print its fields and a window."""
     dataset = build_dataset(n_points=128, n_steps=51, n_seeds=8)
-    sds.write_dataset(dataset, path, compression="gzip")
-    print(f"wrote {path} ({os.path.getsize(path) / 1e6:.1f} MB)")
+    sds.write_dataset(dataset, OUTPUT_PATH, compression="gzip")
+    print(f"wrote {OUTPUT_PATH} ({os.path.getsize(OUTPUT_PATH) / 1e6:.1f} MB)")
 
-    loaded = sds.read_dataset(path)
+    loaded = sds.read_dataset(OUTPUT_PATH)
     print(
         f"dataset: {loaded.dataset_name} | n_traj: {loaded.n_trajectories} | "
         f"present: {loaded.present_fields}"

@@ -1,15 +1,16 @@
-"""HDF5 dataset format and metadata schema for PDE / physics simulation data.
+"""An HDF5 dataset format and metadata schema for PDE / physics simulation data.
 
-:mod:`sciml_data_schema.schema` defines the in-memory dataset representation
-(:class:`~sciml_data_schema.schema.Dataset` and its parts);
-:mod:`sciml_data_schema.io` reads and writes it as HDF5. Producers and consumers
-of simulation data exchange it exclusively through this format.
+One file holds one dataset of ``n_trajectories`` independent runs over a shared spatial
+domain. Every physical quantity -- solution, forcing, coefficient, parameter -- is a
+:class:`Field` with a tensor order, a role and a unit, and three extent flags naming the
+axes its array carries. :mod:`sciml_data_schema.schema` defines the in-memory objects
+(:class:`Dataset` and its parts) and the canonical HDF5 names;
+:mod:`sciml_data_schema.io` writes and reads them (:func:`write_dataset`,
+:class:`DatasetWriter`, :func:`read_dataset`); :mod:`sciml_data_schema.provenance` holds
+the helpers that stamp how a dataset was produced. The format is specified in
+``docs/SCHEMA.md``.
 
-The design is documented in ``SCHEMA.md``. In brief: a single file holds one
-dataset of ``n_trajectories`` independent runs over a shared spatial domain, and
-every physical quantity -- solution, forcing, coefficient, parameter -- is a
-:class:`~sciml_data_schema.schema.Field` tagged with a tensor order, a role, and
-per-file extent flags.
+Everything a producer or a consumer needs is importable from this package root.
 """
 
 from .io import Compression, DatasetWriter, field_placeholder, read_dataset, write_dataset
@@ -34,10 +35,8 @@ __version__ = "0.1.0"
 __all__ = [
     "REGISTRY_VERSION",
     "SCHEMA_VERSION",
-    # The controlled vocabularies (§1). Exported because they appear in the public
-    # signatures above -- `Field.role`, `Dataset.representation`/`grid_type`,
-    # `BoundaryCondition.bc_type` -- so a producer annotating a helper that builds one
-    # needs the type, not just the literal.
+    # The controlled vocabularies: the types of `Field.role`, `Dataset.representation`,
+    # `Dataset.grid_type` and `BoundaryCondition.bc_type`
     "BCType",
     "BoundaryCondition",
     "Dataset",
