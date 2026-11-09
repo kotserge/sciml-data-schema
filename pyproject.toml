@@ -1,6 +1,6 @@
 [project]
 name = "sciml-data-schema"
-version = "0.1.0"
+version = "0.3.0"
 description = "An HDF5 dataset format and metadata schema for PDE / physics simulation data."
 readme = "README.md"
 requires-python = ">=3.11"
