@@ -34,7 +34,11 @@ def test_streamed_write_equals_inline_write(make_dataset, tmp_path):
     for a, b in zip(inline.fields, streamed.fields, strict=True):
         np.testing.assert_array_equal(np.asarray(a.data), np.asarray(b.data))
         assert (a.role, a.unit, a.dim_varying, a.time_varying, a.sample_varying) == (
-            b.role, b.unit, b.dim_varying, b.time_varying, b.sample_varying
+            b.role,
+            b.unit,
+            b.dim_varying,
+            b.time_varying,
+            b.sample_varying,
         )
 
 
