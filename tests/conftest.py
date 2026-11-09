@@ -9,7 +9,7 @@ import pytest
 
 import sciml_data_schema as sds
 
-# Small, fixed dimensions used across the round-trip and validation tests.
+# Small, fixed dimensions shared by the fixture and the tests
 N_TRAJ = 3
 N_STEPS = 4
 NX, NY = 5, 6
@@ -17,15 +17,24 @@ N_DIMS = 2
 
 
 def _build() -> sds.Dataset:
-    """A valid 2D grid dataset exercising every schema feature."""
+    """Build a valid 2D grid dataset exercising every schema feature.
+
+    Returns
+    -------
+    Dataset
+        Fields ``pressure`` (rank 0), ``velocity`` (rank 1), ``stress`` (static,
+        symmetric rank 2), ``reynolds`` (per trajectory) and ``gravity`` (global
+        constant), two boundary conditions, and normalization for ``pressure``
+        (with min/max) and ``velocity``.
+    """
     rng = np.random.default_rng(0)
 
     pressure = rng.standard_normal((N_TRAJ, N_STEPS, NX, NY)).astype(np.float32)
     velocity = rng.standard_normal((N_TRAJ, N_STEPS, NX, NY, N_DIMS)).astype(np.float32)
-    # A static, symmetric rank-2 coefficient (no time axis).
+    # A static, symmetric rank-2 coefficient (no time axis)
     stress = rng.standard_normal((N_TRAJ, NX, NY, N_DIMS, N_DIMS)).astype(np.float32)
     reynolds = rng.standard_normal((N_TRAJ,)).astype(np.float32)
-    # A true global constant: all extent flags False, stored as a length-1 axis.
+    # A true global constant: all extent flags False, stored as a length-1 axis
     gravity = np.array([9.81], dtype=np.float32)
 
     fields = [
@@ -61,7 +70,7 @@ def _build() -> sds.Dataset:
     ]
 
     normalization = {
-        # Pressure additionally ships the optional range stats (schema >= 0.3.0).
+        # Pressure additionally ships the optional range stats (schema >= 0.3.0)
         "pressure": sds.Normalization(
             mean=np.asarray(pressure.mean()),
             std=np.asarray(pressure.std()),
@@ -105,5 +114,12 @@ def _build() -> sds.Dataset:
 
 @pytest.fixture
 def make_dataset() -> Callable[[], sds.Dataset]:
-    """Factory returning a fresh, valid dataset on each call (mutation-safe)."""
+    """Provide a factory that builds a fresh, valid dataset on each call.
+
+    Returns
+    -------
+    Callable[[], Dataset]
+        Builder of the dataset described in :func:`_build`; tests may mutate
+        its result freely.
+    """
     return _build

@@ -1,7 +1,9 @@
-"""The incremental DatasetWriter: streamed output equals inline output, and no
-failure mode leaves a valid-looking partial file behind."""
+"""DatasetWriter tests: streamed output equals inline output; failures leave no file."""
 
 from __future__ import annotations
+
+from collections.abc import Callable
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -10,17 +12,33 @@ import sciml_data_schema as sds
 
 
 def _streamed_copy(dataset: sds.Dataset, name: str) -> tuple[sds.Dataset, np.ndarray]:
-    """Swap field ``name``'s data for a placeholder; return the dataset + original data."""
+    """Replace a field's data with a :func:`field_placeholder`.
+
+    Parameters
+    ----------
+    dataset : Dataset
+        Dataset to modify in place.
+    name : str
+        Field to turn into a streamed field.
+
+    Returns
+    -------
+    tuple[Dataset, np.ndarray]
+        ``dataset`` and the field's original data.
+    """
     fld = next(f for f in dataset.fields if f.name == name)
     original = np.asarray(fld.data)
     fld.data = sds.field_placeholder(original.shape, original.dtype)
     return dataset, original
 
 
-def test_streamed_write_equals_inline_write(make_dataset, tmp_path):
+def test_streamed_write_equals_inline_write(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
+    """Streaming fields trajectory by trajectory gives the same file contents as write_dataset."""
     inline_path = sds.write_dataset(make_dataset(), tmp_path / "inline.h5")
 
-    # Stream the two sample-varying state fields trajectory by trajectory.
+    # Stream the two sample-varying state fields trajectory by trajectory
     streamed_ds, pressure = _streamed_copy(make_dataset(), "pressure")
     streamed_ds, velocity = _streamed_copy(streamed_ds, "velocity")
     streamed_path = tmp_path / "streamed.h5"
@@ -42,7 +60,10 @@ def test_streamed_write_equals_inline_write(make_dataset, tmp_path):
         )
 
 
-def test_missing_trajectory_fails_and_removes_file(make_dataset, tmp_path):
+def test_missing_trajectory_fails_and_removes_file(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
+    """Leaving the context with unwritten trajectories raises and deletes the file."""
     dataset, pressure = _streamed_copy(make_dataset(), "pressure")
     path = tmp_path / "partial.h5"
 
@@ -52,7 +73,10 @@ def test_missing_trajectory_fails_and_removes_file(make_dataset, tmp_path):
     assert not path.exists()
 
 
-def test_exception_inside_context_removes_file(make_dataset, tmp_path):
+def test_exception_inside_context_removes_file(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
+    """An exception inside the context propagates and deletes the file."""
     dataset, _ = _streamed_copy(make_dataset(), "pressure")
     path = tmp_path / "aborted.h5"
 
@@ -62,7 +86,10 @@ def test_exception_inside_context_removes_file(make_dataset, tmp_path):
     assert not path.exists()
 
 
-def test_append_rejects_bad_shape_and_dtype(make_dataset, tmp_path):
+def test_append_rejects_bad_shape_and_dtype(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
+    """append rejects a slice of the wrong shape or dtype, and the file is deleted."""
     dataset, pressure = _streamed_copy(make_dataset(), "pressure")
     path = tmp_path / "checked.h5"
 
@@ -78,23 +105,29 @@ def test_append_rejects_bad_shape_and_dtype(make_dataset, tmp_path):
     assert not path.exists()
 
 
-def test_streamed_field_must_exist_and_be_sample_varying(make_dataset, tmp_path):
+def test_streamed_field_must_exist_and_be_sample_varying(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
+    """The writer rejects unknown or non-sample_varying streamed fields."""
     with pytest.raises(ValueError, match="not in dataset"):
         sds.DatasetWriter(make_dataset(), tmp_path / "x.h5", streamed=("nope",))
 
-    # "gravity" is the all-flags-False global constant in the fixture.
+    # gravity is the all-flags-False global constant in the fixture
     with pytest.raises(ValueError, match="must be sample_varying"):
         sds.DatasetWriter(make_dataset(), tmp_path / "x.h5", streamed=("gravity",))
 
 
-def test_update_normalization_lands_in_file(make_dataset, tmp_path):
+def test_update_normalization_lands_in_file(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
+    """Statistics set with update_normalization are written on close."""
     dataset, pressure = _streamed_copy(make_dataset(), "pressure")
     path = tmp_path / "stats.h5"
 
     with sds.DatasetWriter(dataset, path, streamed=("pressure",)) as w:
         for i in range(pressure.shape[0]):
             w.append("pressure", i, pressure[i])
-        # Stats computed during the pass replace the placeholder entry on close.
+        # Stats computed during the pass are written on close
         w.update_normalization(
             "pressure",
             sds.Normalization(
@@ -113,7 +146,10 @@ def test_update_normalization_lands_in_file(make_dataset, tmp_path):
     np.testing.assert_allclose(loaded.min, pressure.min())
 
 
-def test_compression_spec_is_applied_and_roundtrips(make_dataset, tmp_path):
+def test_compression_spec_is_applied_and_roundtrips(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
+    """A Compression spec sets the HDF5 filters and the data reads back unchanged."""
     import h5py
 
     spec = sds.Compression("gzip", level=1, shuffle=True)
@@ -132,8 +168,10 @@ def test_compression_spec_is_applied_and_roundtrips(make_dataset, tmp_path):
     )
 
 
-def test_write_dataset_still_roundtrips_via_writer(make_dataset, tmp_path):
-    # write_dataset is now the degenerate streamed=() case; a plain roundtrip stays intact.
+def test_write_dataset_still_roundtrips_via_writer(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path
+) -> None:
+    """write_dataset, i.e. the writer with nothing streamed, round-trips."""
     original = make_dataset()
     loaded = sds.read_dataset(sds.write_dataset(original, tmp_path / "plain.h5"))
     assert loaded.present_fields == original.present_fields

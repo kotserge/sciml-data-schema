@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import ModuleType
 
 import sciml_data_schema as sds
 
 _EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "advection_diffusion.py"
 
 
-def _load_example():
+def _load_example() -> ModuleType:
+    """Import ``examples/advection_diffusion.py``, which is not a package module."""
     spec = importlib.util.spec_from_file_location("advection_diffusion_example", _EXAMPLE)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -18,10 +20,11 @@ def _load_example():
     return module
 
 
-def test_example_builds_valid_dataset_and_roundtrips(tmp_path):
+def test_example_builds_valid_dataset_and_roundtrips(tmp_path: Path) -> None:
+    """The example builds a valid dataset that round-trips and windows."""
     example = _load_example()
 
-    # Keep it tiny: 1 advection x 1 diffusion x 2 seeds = 2 trajectories.
+    # Keep it tiny: 1 advection x 1 diffusion x 2 seeds = 2 trajectories
     dataset = example.build_dataset(
         n_points=16,
         n_steps=5,
