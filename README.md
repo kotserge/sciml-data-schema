@@ -102,11 +102,10 @@ See [`examples/advection_diffusion.py`](examples/advection_diffusion.py) for a c
 
 ## Development
 
-Recipes are in the [`justfile`](justfile):
-
 ```bash
-just sync       # install the package and dev dependencies
-just check      # lint, type check, tests
-just fmt        # format
-just test -k io # run a subset of the tests
+uv sync --extra dev
+uv run pytest               # tests
+uv run ruff check           # lint
+uv run ruff format          # format
+uv run basedpyright         # type-check
 ```
