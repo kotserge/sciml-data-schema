@@ -37,6 +37,10 @@ A *field* is the single storage primitive. It is described by:
 | `sample_varying` | `True` if it varies across trajectories.                                |
 | `symmetric` / `antisymmetric` | For `tensor_order=2` only.                                 |
 
+`tensor_order`, `role` and `unit` are the field's *identity*: they are stored once,
+in the field registry (§2). The extent flags (and, for `t2`, the symmetry flags)
+are attributes of the field's dataset.
+
 **Why this dissolves the scalar-vs-field jump.** The same physical quantity
 keeps one home regardless of how much it varies. Refining a constant `κ` into a
 heterogeneous `κ(x)` is a single flag flip (`dim_varying: False → True`), not a
@@ -61,9 +65,15 @@ For a 2D grid profile, a `t0` (scalar) field, depending on its flags:
 | yes         | yes          | yes            | `(n_traj, n_steps, X, Y)` | solution `u(x,y,t)`            |
 | yes         | no           | yes            | `(n_traj, X, Y)`          | static coefficient `κ(x,y)`    |
 | no          | no           | yes            | `(n_traj,)`               | global parameter (e.g. `Re`)   |
-| no          | no           | no             | `(1,)`                    | a true global constant         |
+| no          | no           | no             | `()` or `(1,)`            | a true global constant         |
 
-A `t1` (vector) field appends a components axis `D`; a `t2` field appends
+In general, with each leading axis present only if its flag is set:
+
+```
+(n_trajectories?, n_timesteps?, *spatial_shape?, *(n_spatial_dims,) * tensor_order)
+```
+
+A `t1` (vector) field appends a components axis `D = n_spatial_dims`; a `t2` field appends
 `D, D`. The mesh profile replaces the spatial axes `(X, Y[, Z])` with a single
 DOF axis `(N_dof)` — see §6.
 
@@ -77,7 +87,9 @@ registry that fixes the *identity* of every quantity. This is the linchpin for
 Rayleigh–Bénard file and `velocity` in a Euler file are the *same* registered
 field, so a model can share parameters across them.
 
-Stored as a root JSON attribute `field_registry`:
+Stored as a root JSON attribute `field_registry`, versioned by the root attribute
+`registry_version` independently of `schema_version`. A missing `unit` reads as
+`dimensionless`:
 
 ```json
 {
@@ -93,6 +105,10 @@ Stored as a root JSON attribute `field_registry`:
 Individual files declare *which* registry entries are present (a
 field-presence list), so a 1-field Poisson file and a 5-field Euler file share
 the registry without storing absent fields.
+
+The registry written to a file is the producer's explicit registry (which may be a
+superset of the present fields) plus the identity of every present field without an
+explicit entry. A present field that disagrees with its explicit entry fails validation.
 
 ---
 
@@ -113,11 +129,11 @@ it's what the loader uses to split conditioning inputs from prediction targets.
 | **Initial condition** | `u₀` | *not a separate object* — it is the `t=0` slice of the state field | — | — |
 | **IC-generation knobs** | seed, amplitude | rank-0 field | `parameter` | `dim_varying=False`, `time_varying=False`, `sample_varying=True` |
 | **Volumetric forcing / source** | `f(x,t)` | field, tensor order by type | `forcing` | flags per its actual variation |
-| **Boundary forcing** | inflow/flux profile | `boundary_conditions/<bc>/values` | `boundary` | (lives in BC group, see §4) |
+| **Boundary forcing** | inflow/flux profile | `boundary_conditions/<bc>/values` | — | (lives in BC group, see §4) |
 | **Global parameter** | `Re`, `Ra`, `Pr` | rank-0 field, broadcast | `parameter` | `dim_varying=False`, `time_varying=False`, `sample_varying=True` |
 | **Spatially-varying coefficient** | `κ(x)`, anisotropic `K(x)` | t0/t1/t2 field | `coefficient` | `dim_varying=True`, usually `time_varying=False` |
 | **Domain geometry** | `Ω` | profile-specific (axes vs mesh) | — | see §5 / §6 |
-| **Time axis** | `t` | `dimensions/time` | — | constant `dt` or explicit vector |
+| **Time axis** | `t` | `dimensions/time` | — | coordinate vector |
 | **Boundary conditions** | — | `boundary_conditions` group | — | type + mask + values (§4) |
 
 **The role tag is the only addition beyond The Well**, and it earns its place
@@ -125,6 +141,9 @@ here: The Well folds `state`, `forcing`, and `coefficient` into the same groups
 and its loader windows everything as state. By tagging role, your loader routes
 `state` → prediction targets and `forcing`/`coefficient`/`parameter` →
 conditioning inputs, with no schema surgery.
+
+The `boundary` role is for boundary data stored as a regular field; values attached to
+a named boundary condition live in its `values` dataset and carry no role.
 
 **Steady-state problems** (e.g. Poisson) are handled by `time_varying=False` on
 the state field and `n_steps = 1` (or omit the time axis entirely). The same
@@ -134,21 +153,24 @@ schema covers steady → time-dependent with one flag.
 
 ## 4. Shared core layout
 
-Common to every profile.
+Common to every profile. `@` marks an HDF5 attribute.
 
 ```
 /                                   (root)
-├── @schema_version        : "0.1.0"
+├── @schema_version        : "0.3.0"
+├── @registry_version      : "0.1.0"
 ├── @dataset_name          : str
 ├── @representation        : "grid" | "mesh" | "particle"
+├── @grid_type             : "cartesian" | "spherical"   # written for every file (§5)
 ├── @n_spatial_dims        : 0 | 1 | 2 | 3   # 0 = no spatial domain (ODE); time axis only
 ├── @n_trajectories        : int
 ├── @field_registry        : JSON (see §2)
 ├── @present_fields        : list[str]         # which registry entries are here
+├── @provenance            : JSON {str: str}   # optional: config, git revision, time, ...
 │   # NB: train/val/test splits are a downstream-consumer concern, not stored here.
 │
 ├── dimensions/
-│   ├── time               : (n_steps,) float   # or @dt scalar if uniform
+│   ├── time               : (n_steps,) float   # time coordinate vector
 │   └── @spatial_dims      : ["x","y"]           # axis names (semantics; coords in profile)
 │
 ├── boundary_conditions/
@@ -156,8 +178,8 @@ Common to every profile.
 │       ├── @bc_type          : "periodic" | "dirichlet" | "neumann" | "wall" | "open"
 │       ├── @associated_fields : [str]
 │       ├── @associated_dims    : [str]
-│       ├── mask              : bool array        # where the BC applies
-│       └── values            : array             # prescribed values (= boundary forcing)
+│       ├── mask              : bool array        # optional: where the BC applies
+│       └── values            : array             # optional: prescribed values (= boundary forcing)
 │
 ├── normalization/
 │   └── <field_name>/  @mean, @std (per component)   # ship stats, don't recompute
@@ -169,9 +191,23 @@ Common to every profile.
 └── t2_fields/  <field datasets>     # rank-2
 ```
 
-Each field dataset carries the §1 attributes (`name`, `role`, `unit`,
-`dim_varying`, `time_varying`, `sample_varying`, …). A validator checks every
-file against this core plus its profile.
+All three field groups are always created, possibly empty. Each field dataset is
+named after its field and carries the attributes
+`dim_varying`, `time_varying`, `sample_varying` and, for `t2` fields, `symmetric` /
+`antisymmetric`; its tensor order, role and unit come from the registry.
+
+`Dataset.validate` checks the core on every write and read:
+
+- `representation` is one of the listed values; `0 ≤ n_spatial_dims ≤ 3` and
+  `spatial_dims` has `n_spatial_dims` entries.
+- Field names are unique across all tensor ranks; each field's array matches its
+  flags and tensor order (§1), and with `n_spatial_dims = 0` no field is `dim_varying`.
+- Symmetry flags are exclusive and only set on `t2` fields.
+- Every field agrees with its registry entry (§2).
+- Normalization entries and boundary conditions reference only present fields
+  and `spatial_dims`.
+
+Profile-specific checks (§5, §6) are not implemented yet.
 
 ---
 
@@ -180,7 +216,7 @@ file against this core plus its profile.
 Spatial backend = separable, logically-Cartesian axes.
 
 ```
-├── @grid_type             : "cartesian" | "spherical"
+├── @grid_type             : "cartesian" | "spherical"   # root attribute, default "cartesian"
 ├── dimensions/
 │   ├── x                  : (X,) float          # 1D coordinate vector per axis
 │   ├── y                  : (Y,) float
@@ -199,6 +235,9 @@ to it and you inherit their tooling for free on grid data.
 Spatial backend = unstructured topology. The spatial axes collapse to a single
 DOF axis, and geometry/topology are stored explicitly.
 
+**Not implemented yet:** the package accepts `representation = "mesh"` but does not
+read or write the `geometry/` group below.
+
 ```
 ├── geometry/
 │   ├── vertices           : (n_traj?, N_vert, n_spatial_dims) float
@@ -216,8 +255,7 @@ mesh) or shared (one mesh, drop the trajectory axis).
 **Note on DOFs vs vertices.** For P1, DOFs coincide with vertices and `coords`
 mirrors `vertices`. For P2+ or DG, DOFs are *not* the vertices, so `dof_map`
 carries the authoritative DOF coordinates — this is what a point/token model
-would consume. (You confirmed grid+mesh aren't mixed, so this profile's loader
-never has to reconcile with the grid one.)
+would consume.
 
 ---
 
@@ -293,8 +331,9 @@ this. A spatial PDE is the same encoding with `dim_varying=True` and a non-empty
 
 ## 8. Loader contract (per profile)
 
-A shared base class handles everything profile-independent; each profile
-subclass overrides only spatial decoding.
+Loaders are not part of this package; this is the contract they follow. A shared
+base class handles everything profile-independent; each profile subclass overrides
+only spatial decoding.
 
 - **Shared base:** trajectory windowing (`T_in → T_out`), normalization (apply
   shipped stats), role-based routing (`state` → targets; everything else →
@@ -305,11 +344,15 @@ subclass overrides only spatial decoding.
 - **Mesh subclass:** decodes `(…, N_dof[, D])` arrays; attaches `geometry`/`dof_map`.
 
 **Writer contract (>= 0.3.0).** Datasets whose bulk fields exceed memory are written
-through an incremental `DatasetWriter`: metadata and small fields go first, streamed
-fields are created at full shape (chunked by trajectory/timestep) and filled
-trajectory-by-trajectory; closing verifies completeness, and any failure deletes the
-file — a partial write never leaves a valid-looking file. `write_dataset` is the
-all-inline degenerate case.
+through an incremental `DatasetWriter`: streamed fields carry `field_placeholder`
+data, must be `sample_varying`, and are created at full shape (chunked by
+trajectory/timestep) and filled trajectory-by-trajectory with `append`; everything
+else is written on entering. Normalization is written on close, so statistics
+computed during the pass can be set with `update_normalization`. Closing verifies
+completeness, and any failure deletes the file — a partial write never leaves a
+valid-looking file. `write_dataset` is the all-inline degenerate case. Both accept a
+`Compression` spec (filter, level, byte-shuffle) applied to every field and
+boundary-condition dataset.
 
 **Within-representation multi-physics** uses a scenario-interleaved sampler
 above the loaders: each batch is drawn from one dataset (homogeneous spatial
@@ -325,6 +368,7 @@ presence list + a channel mask let it ingest variable field sets.
 - Conditioning interface: do you broadcast `parameter` fields into channels, or
   pass them as a separate conditioning vector? (Storage is identical; this is a
   loader choice.)
-- Whether to version the `field_registry` separately from `schema_version`.
-- Compression/chunking defaults per profile (grid: chunk by trajectory; mesh:
-  chunk by trajectory × DOF blocks).
+- Compression/chunking defaults per profile. Today compression is chosen per
+  write and only streamed fields are chunked (by trajectory, and timestep if
+  present); mesh would chunk by trajectory × DOF blocks.
+- The `particle` representation has no profile yet.
