@@ -29,6 +29,8 @@ import numpy as np
 
 import sciml_data_schema as sds
 
+# __ Data _______
+
 
 def build_dataset(
     *,
@@ -49,15 +51,46 @@ def build_dataset(
     pair. Each periodic mode evolves exactly,
     ``u_hat_k(t) = u_hat_k(0) * exp((-i a k - D k^2) t)``, so the data carries no
     time-discretization error.
+
+    Parameters
+    ----------
+    length : float
+        Domain length ``L`` of the periodic interval ``[0, L)``.
+    n_points : int
+        Number of grid points.
+    n_steps : int
+        Number of stored timesteps, including ``t = 0``.
+    t_final : float
+        Time of the last stored step.
+    advections : tuple[float, ...]
+        Advection speeds ``a``.
+    diffusions : tuple[float, ...]
+        Diffusion coefficients ``D``.
+    n_seeds : int
+        Initial conditions per ``(a, D)`` pair.
+    n_modes : int
+        Number of Fourier modes in each initial condition.
+    seed0 : int
+        Random seed of the first initial condition; seed ``s`` uses ``seed0 + s``.
+
+    Returns
+    -------
+    Dataset
+        ``len(advections) * len(diffusions) * n_seeds`` trajectories of ``u``
+        (float32, ``(n_traj, n_steps, n_points)``), the per-trajectory
+        parameters ``advection`` and ``diffusion``, and their normalization.
     """
+    # One trajectory per (advection, diffusion, seed) combination
     combos = [(a, d, s) for a in advections for d in diffusions for s in range(n_seeds)]
     n_traj = len(combos)
 
+    # Spatial grid, time axis and spectral wavenumbers
     dx = length / n_points
     x = np.arange(n_points) * dx
     times = np.linspace(0.0, t_final, n_steps)
     k = np.fft.fftfreq(n_points, d=dx) * 2.0 * np.pi  # angular wavenumbers
 
+    # Evolve each initial condition exactly in Fourier space
     u = np.empty((n_traj, n_steps, n_points), dtype=np.float32)
     a_arr = np.empty((n_traj,), dtype=np.float32)
     d_arr = np.empty((n_traj,), dtype=np.float32)
@@ -76,10 +109,11 @@ def build_dataset(
             u[i, j] = np.fft.ifft(u0_hat * propagator).real
         a_arr[i], d_arr[i] = a, d
 
+    # Assemble the fields, their statistics, and the dataset
     fields = [
-        # Solution: varies across trajectories, time, and space.
+        # Solution: varies across trajectories, time, and space
         sds.Field(name="u", data=u, tensor_order=0, role="state"),
-        # Scalar parameters: one value per trajectory, broadcast on read.
+        # Scalar parameters: one value per trajectory, broadcast on read
         sds.Field(
             name="advection",
             data=a_arr,
@@ -129,12 +163,27 @@ def build_dataset(
     )
 
 
-class TrainingWindow(NamedTuple):
-    """One model input/target window plus the trajectory's conditioning params."""
+# __ Training view _______
 
-    input: np.ndarray  # (n_in, n_points)  past states
-    target: np.ndarray  # (n_out, n_points) future states (prediction target)
-    params: np.ndarray  # (n_params,)       scalar conditioning values
+
+class TrainingWindow(NamedTuple):
+    """One model input/target window plus the trajectory's conditioning params.
+
+    Attributes
+    ----------
+    input : np.ndarray
+        Past states, shape ``(n_in, n_points)``.
+    target : np.ndarray
+        Future states to predict, shape ``(n_out, n_points)``.
+    params : np.ndarray
+        Scalar conditioning values, shape ``(n_params,)``.
+    param_names : list[str]
+        Field name of each entry of ``params``.
+    """
+
+    input: np.ndarray
+    target: np.ndarray
+    params: np.ndarray
     param_names: list[str]
 
 
@@ -148,6 +197,21 @@ def windowed_training_view(
     trajectory, window ``u`` into past (input) and future (target) frames, and
     collect the scalar parameters as a conditioning vector -- the role-based
     routing a downstream loader would perform, in plain NumPy.
+
+    Parameters
+    ----------
+    dataset : Dataset
+        Dataset with the fields ``u``, ``advection`` and ``diffusion``, as
+        built by :func:`build_dataset`.
+    n_in : int
+        Number of input frames.
+    n_out : int
+        Number of target frames; ``n_in + n_out`` must not exceed ``n_steps``.
+
+    Returns
+    -------
+    TrainingWindow
+        The window of trajectory 0.
     """
     by_name = {f.name: f for f in dataset.fields}
 
@@ -167,7 +231,11 @@ def windowed_training_view(
     )
 
 
+# __ Main _______
+
+
 def main() -> None:
+    """Write the dataset to the working directory, read it back, and print a summary."""
     import os
 
     path = "advection_diffusion_1d.h5"
