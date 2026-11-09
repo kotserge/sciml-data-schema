@@ -1,30 +1,23 @@
 # PDE Data Schema — Draft
 
-A HDF5 schema for storing PDE solution data for ML, derived from The Well's
-conventions but restructured around two principles it lacks:
+A HDF5 schema for storing PDE solution data for ML, derived from The Well's conventions but restructured around two principles it lacks:
 
-1. **One core, several profiles.** A single shared *core convention* governs
-   metadata, fields, normalization, boundary conditions, and provenance. Each
-   *spatial representation* (grid, mesh, …) is a **profile** that differs from
-   the others *only* in how the spatial domain and field arrays are encoded.
-2. **A unified field model.** Every physical quantity — solution, forcing,
-   coefficient, parameter — is a *field*. There is no separate "scalars" group.
-   A quantity carries two orthogonal pieces of metadata: its **tensor order**
-   (t0/t1/t2) and its **extent flags** (`dim_varying` / `time_varying` /
-   `sample_varying`). A "scalar parameter" is just a rank-0 field that doesn't
-   vary in space or time.
+1. **One core, several profiles.** A single shared *core convention* governs metadata, fields, normalization, boundary conditions, and provenance.
+   Each *spatial representation* (grid, mesh, …) is a **profile** that differs from the others *only* in how the spatial domain and field arrays are encoded.
+2. **A unified field model.** Every physical quantity — solution, forcing, coefficient, parameter — is a *field*.
+   There is no separate "scalars" group.
+   A quantity carries two orthogonal pieces of metadata: its **tensor order** (t0/t1/t2) and its **extent flags** (`dim_varying` / `time_varying` / `sample_varying`).
+   A "scalar parameter" is just a rank-0 field that doesn't vary in space or time.
 
-Scope ceilings (inherited, deliberate): spatial dimensions ≤ 3 (and `0` for problems
-with no spatial domain, e.g. ODEs — a time axis only); tensor rank ≤ 2.
-Cross-representation training is **not** a goal — grid and mesh files are never
-mixed in one batch — so the profiles need only agree on the core, not on spatial
-layout.
+Scope ceilings (inherited, deliberate): spatial dimensions ≤ 3 (and `0` for problems with no spatial domain, e.g. ODEs — a time axis only); tensor rank ≤ 2.
+Cross-representation training is **not** a goal — grid and mesh files are never mixed in one batch — so the profiles need only agree on the core, not on spatial layout.
 
 ---
 
 ## 1. The unified field model
 
-A *field* is the single storage primitive. It is described by:
+A *field* is the single storage primitive.
+It is described by:
 
 | Attribute        | Meaning                                                                 |
 |------------------|-------------------------------------------------------------------------|
@@ -37,24 +30,17 @@ A *field* is the single storage primitive. It is described by:
 | `sample_varying` | `True` if it varies across trajectories.                                |
 | `symmetric` / `antisymmetric` | For `tensor_order=2` only.                                 |
 
-`tensor_order`, `role` and `unit` are the field's *identity*: they are stored once,
-in the field registry (§2). The extent flags (and, for `t2`, the symmetry flags)
-are attributes of the field's dataset.
+`tensor_order`, `role` and `unit` are the field's *identity*: they are stored once, in the field registry (§2).
+The extent flags (and, for `t2`, the symmetry flags) are attributes of the field's dataset.
 
-**Why this dissolves the scalar-vs-field jump.** The same physical quantity
-keeps one home regardless of how much it varies. Refining a constant `κ` into a
-heterogeneous `κ(x)` is a single flag flip (`dim_varying: False → True`), not a
-move between groups — so the schema is stable under refinement.
+**Why this dissolves the scalar-vs-field jump.** The same physical quantity keeps one home regardless of how much it varies.
+Refining a constant `κ` into a heterogeneous `κ(x)` is a single flag flip (`dim_varying: False → True`), not a move between groups — so the schema is stable under refinement.
 
-**Storage stays cheap.** A field with `dim_varying=False` is stored *without*
-spatial axes (one value, broadcast on read); a field with `time_varying=False`
-drops the time axis; one with `sample_varying=False` drops the trajectory axis.
+**Storage stays cheap.** A field with `dim_varying=False` is stored *without* spatial axes (one value, broadcast on read); a field with `time_varying=False` drops the time axis; one with `sample_varying=False` drops the trajectory axis.
 Nothing materializes a redundant array of identical numbers.
 
-Fields are still **grouped by tensor order** (`t0_fields`, `t1_fields`,
-`t2_fields`) because tensor order is load-bearing (it governs how a quantity
-transforms). Tensor order is the *only* distinction kept from The Well's group
-structure; the scalars group is gone.
+Fields are still **grouped by tensor order** (`t0_fields`, `t1_fields`, `t2_fields`) because tensor order is load-bearing (it governs how a quantity transforms).
+Tensor order is the *only* distinction kept from The Well's group structure; the scalars group is gone.
 
 ### Resulting array shapes
 
@@ -73,23 +59,18 @@ In general, with each leading axis present only if its flag is set:
 (n_trajectories?, n_timesteps?, *spatial_shape?, *(n_spatial_dims,) * tensor_order)
 ```
 
-A `t1` (vector) field appends a components axis `D = n_spatial_dims`; a `t2` field appends
-`D, D`. The mesh profile replaces the spatial axes `(X, Y[, Z])` with a single
-DOF axis `(N_dof)` — see §6.
+A `t1` (vector) field appends a components axis `D = n_spatial_dims`; a `t2` field appends `D, D`.
+The mesh profile replaces the spatial axes `(X, Y[, Z])` with a single DOF axis `(N_dof)` — see §6.
 
 ---
 
 ## 2. The field registry (canonical vocabulary)
 
-A per-file (but conventionally identical across all files of a representation)
-registry that fixes the *identity* of every quantity. This is the linchpin for
-**within-representation multi-physics**: it guarantees that `velocity` in a
-Rayleigh–Bénard file and `velocity` in a Euler file are the *same* registered
-field, so a model can share parameters across them.
+A per-file (but conventionally identical across all files of a representation) registry that fixes the *identity* of every quantity.
+This is the linchpin for **within-representation multi-physics**: it guarantees that `velocity` in a Rayleigh–Bénard file and `velocity` in a Euler file are the *same* registered field, so a model can share parameters across them.
 
-Stored as a root JSON attribute `field_registry`, versioned by the root attribute
-`registry_version` independently of `schema_version`. A missing `unit` reads as
-`dimensionless`:
+Stored as a root JSON attribute `field_registry`, versioned by the root attribute `registry_version` independently of `schema_version`.
+A missing `unit` reads as `dimensionless`:
 
 ```json
 {
@@ -102,13 +83,10 @@ Stored as a root JSON attribute `field_registry`, versioned by the root attribut
 }
 ```
 
-Individual files declare *which* registry entries are present (a
-field-presence list), so a 1-field Poisson file and a 5-field Euler file share
-the registry without storing absent fields.
+Individual files declare *which* registry entries are present (a field-presence list), so a 1-field Poisson file and a 5-field Euler file share the registry without storing absent fields.
 
-The registry written to a file is the producer's explicit registry (which may be a
-superset of the present fields) plus the identity of every present field without an
-explicit entry. A present field that disagrees with its explicit entry fails validation.
+The registry written to a file is the producer's explicit registry (which may be a superset of the present fields) plus the identity of every present field without an explicit entry.
+A present field that disagrees with its explicit entry fails validation.
 
 ---
 
@@ -120,8 +98,8 @@ A generic PDE,
 ∂u/∂t = N(u; θ) + f      on Ω,    + boundary conditions,    + u(t=0) = u₀
 ```
 
-maps as follows. **Role** is the bridge between PDE meaning and storage, and
-it's what the loader uses to split conditioning inputs from prediction targets.
+maps as follows.
+**Role** is the bridge between PDE meaning and storage, and it's what the loader uses to split conditioning inputs from prediction targets.
 
 | PDE concept | Symbol | Representation | role | typical flags |
 |-------------|--------|----------------|------|----------------|
@@ -136,24 +114,20 @@ it's what the loader uses to split conditioning inputs from prediction targets.
 | **Time axis** | `t` | `dimensions/time` | — | coordinate vector |
 | **Boundary conditions** | — | `boundary_conditions` group | — | type + mask + values (§4) |
 
-**The role tag is the only addition beyond The Well**, and it earns its place
-here: The Well folds `state`, `forcing`, and `coefficient` into the same groups
-and its loader windows everything as state. By tagging role, your loader routes
-`state` → prediction targets and `forcing`/`coefficient`/`parameter` →
-conditioning inputs, with no schema surgery.
+**The role tag is the only addition beyond The Well**, and it earns its place here: The Well folds `state`, `forcing`, and `coefficient` into the same groups and its loader windows everything as state.
+By tagging role, your loader routes `state` → prediction targets and `forcing`/`coefficient`/`parameter` → conditioning inputs, with no schema surgery.
 
-The `boundary` role is for boundary data stored as a regular field; values attached to
-a named boundary condition live in its `values` dataset and carry no role.
+The `boundary` role is for boundary data stored as a regular field; values attached to a named boundary condition live in its `values` dataset and carry no role.
 
-**Steady-state problems** (e.g. Poisson) are handled by `time_varying=False` on
-the state field and `n_steps = 1` (or omit the time axis entirely). The same
-schema covers steady → time-dependent with one flag.
+**Steady-state problems** (e.g. Poisson) are handled by `time_varying=False` on the state field and `n_steps = 1` (or omit the time axis entirely).
+The same schema covers steady → time-dependent with one flag.
 
 ---
 
 ## 4. Shared core layout
 
-Common to every profile. `@` marks an HDF5 attribute.
+Common to every profile.
+`@` marks an HDF5 attribute.
 
 ```
 /                                   (root)
@@ -191,21 +165,16 @@ Common to every profile. `@` marks an HDF5 attribute.
 └── t2_fields/  <field datasets>     # rank-2
 ```
 
-All three field groups are always created, possibly empty. Each field dataset is
-named after its field and carries the attributes
-`dim_varying`, `time_varying`, `sample_varying` and, for `t2` fields, `symmetric` /
-`antisymmetric`; its tensor order, role and unit come from the registry.
+All three field groups are always created, possibly empty.
+Each field dataset is named after its field and carries the attributes `dim_varying`, `time_varying`, `sample_varying` and, for `t2` fields, `symmetric` / `antisymmetric`; its tensor order, role and unit come from the registry.
 
 `Dataset.validate` checks the core on every write and read:
 
-- `representation` is one of the listed values; `0 ≤ n_spatial_dims ≤ 3` and
-  `spatial_dims` has `n_spatial_dims` entries.
-- Field names are unique across all tensor ranks; each field's array matches its
-  flags and tensor order (§1), and with `n_spatial_dims = 0` no field is `dim_varying`.
+- `representation` is one of the listed values; `0 ≤ n_spatial_dims ≤ 3` and `spatial_dims` has `n_spatial_dims` entries.
+- Field names are unique across all tensor ranks; each field's array matches its flags and tensor order (§1), and with `n_spatial_dims = 0` no field is `dim_varying`.
 - Symmetry flags are exclusive and only set on `t2` fields.
 - Every field agrees with its registry entry (§2).
-- Normalization entries and boundary conditions reference only present fields
-  and `spatial_dims`.
+- Normalization entries and boundary conditions reference only present fields and `spatial_dims`.
 
 Profile-specific checks (§5, §6) are not implemented yet.
 
@@ -223,20 +192,18 @@ Spatial backend = separable, logically-Cartesian axes.
 │   └── (z)                : (Z,) float
 ```
 
-Field arrays carry explicit spatial axes (shapes per §1): scalar state →
-`(n_traj, n_steps, X, Y)`, vector state → `(…, X, Y, D)`. Boundary masks are
-grid-shaped. This is the profile The Well's loaders already understand; conform
-to it and you inherit their tooling for free on grid data.
+Field arrays carry explicit spatial axes (shapes per §1): scalar state → `(n_traj, n_steps, X, Y)`, vector state → `(…, X, Y, D)`.
+Boundary masks are grid-shaped.
+This is the profile The Well's loaders already understand; conform to it and you inherit their tooling for free on grid data.
 
 ---
 
 ## 6. Mesh profile
 
-Spatial backend = unstructured topology. The spatial axes collapse to a single
-DOF axis, and geometry/topology are stored explicitly.
+Spatial backend = unstructured topology.
+The spatial axes collapse to a single DOF axis, and geometry/topology are stored explicitly.
 
-**Not implemented yet:** the package accepts `representation = "mesh"` but does not
-read or write the `geometry/` group below.
+**Not implemented yet:** the package accepts `representation = "mesh"` but does not read or write the `geometry/` group below.
 
 ```
 ├── geometry/
@@ -248,14 +215,11 @@ read or write the `geometry/` group below.
 │       └── coords          : (N_dof, n_spatial_dims) float       # DOF coordinates
 ```
 
-Field arrays are flat over DOFs: scalar state → `(n_traj, n_steps, N_dof)`,
-vector state → `(…, N_dof, D)`. `vertices` may be `sample_varying` (per-trajectory
-mesh) or shared (one mesh, drop the trajectory axis).
+Field arrays are flat over DOFs: scalar state → `(n_traj, n_steps, N_dof)`, vector state → `(…, N_dof, D)`.
+`vertices` may be `sample_varying` (per-trajectory mesh) or shared (one mesh, drop the trajectory axis).
 
-**Note on DOFs vs vertices.** For P1, DOFs coincide with vertices and `coords`
-mirrors `vertices`. For P2+ or DG, DOFs are *not* the vertices, so `dof_map`
-carries the authoritative DOF coordinates — this is what a point/token model
-would consume.
+**Note on DOFs vs vertices.** For P1, DOFs coincide with vertices and `coords` mirrors `vertices`.
+For P2+ or DG, DOFs are *not* the vertices, so `dof_map` carries the authoritative DOF coordinates — this is what a point/token model would consume.
 
 ---
 
@@ -277,8 +241,7 @@ boundary_conditions/
   outer_wall  : bc_type=dirichlet, values=(…), mask=(…)
 ```
 
-Steady => no time axis; `u` is the prediction target, `source` + `diffusivity`
-are conditioning inputs (by role).
+Steady => no time axis; `u` is the prediction target, `source` + `diffusivity` are conditioning inputs (by role).
 
 ### B. Forced incompressible Navier–Stokes, time-dependent (grid profile)
 
@@ -298,16 +261,14 @@ boundary_conditions/
   all        : bc_type=periodic
 ```
 
-`velocity` + `pressure` are targets; `body_force` + `reynolds` are conditioning
-inputs. `reynolds` is stored as one number per trajectory and broadcast — the
-"scalar parameter" case, with no special group.
+`velocity` + `pressure` are targets; `body_force` + `reynolds` are conditioning inputs.
+`reynolds` is stored as one number per trajectory and broadcast — the "scalar parameter" case, with no special group.
 
 ### C. Controlled ODE, no spatial domain (grid profile, `n_spatial_dims = 0`)
 
-`du/dt = a·c(t) + b` on `t ∈ [0, T]`. The operator maps the control `c(·)` (+ the
-initial value `u(0)`) to the solution `u(·)`. There is **no** spatial coordinate — the
-only independent variable, `t`, is the time axis — so `n_spatial_dims = 0` and
-`spatial_dims = []`.
+`du/dt = a·c(t) + b` on `t ∈ [0, T]`.
+The operator maps the control `c(·)` (+ the initial value `u(0)`) to the solution `u(·)`.
+There is **no** spatial coordinate — the only independent variable, `t`, is the time axis — so `n_spatial_dims = 0` and `spatial_dims = []`.
 
 ```
 representation = "grid",  n_spatial_dims = 0,  spatial_dims = []
@@ -320,55 +281,38 @@ t0_fields/
   coeff_b  : (n_traj,)       role=parameter, dim_varying=False, time_varying=False
 ```
 
-`u` is the prediction target; `control` + `coeff_a`/`coeff_b` are conditioning inputs
-(by role). The initial condition `u(0)` is `u[:, 0]` (§3: "IC = t=0 slice of state"), so
-it is not stored separately. With zero spatial dims, **every** field is
-`dim_varying=False` (there is no spatial axis to vary over) — the validator enforces
-this. A spatial PDE is the same encoding with `dim_varying=True` and a non-empty
-`spatial_dims`; the ODE is its zero-space limit.
+`u` is the prediction target; `control` + `coeff_a`/`coeff_b` are conditioning inputs (by role).
+The initial condition `u(0)` is `u[:, 0]` (§3: "IC = t=0 slice of state"), so it is not stored separately.
+With zero spatial dims, **every** field is `dim_varying=False` (there is no spatial axis to vary over) — the validator enforces this.
+A spatial PDE is the same encoding with `dim_varying=True` and a non-empty `spatial_dims`; the ODE is its zero-space limit.
 
 ---
 
 ## 8. Loader contract (per profile)
 
-Loaders are not part of this package; this is the contract they follow. A shared
-base class handles everything profile-independent; each profile subclass overrides
-only spatial decoding.
+Loaders are not part of this package; this is the contract they follow.
+A shared base class handles everything profile-independent; each profile subclass overrides only spatial decoding.
 
-- **Shared base:** trajectory windowing (`T_in → T_out`), normalization (apply
-  shipped stats), role-based routing (`state` → targets; everything else →
-  conditioning), broadcasting of `dim_varying=False` / `time_varying=False`
-  fields, presence-masking, and the HDF5 IO mechanics (lazy per-worker file
-  open, trajectory-aligned chunking).
+- **Shared base:** trajectory windowing (`T_in → T_out`), normalization (apply shipped stats), role-based routing (`state` → targets; everything else → conditioning), broadcasting of `dim_varying=False` / `time_varying=False` fields, presence-masking, and the HDF5 IO mechanics (lazy per-worker file open, trajectory-aligned chunking).
 - **Grid subclass:** decodes `(…, X, Y[, Z])` arrays; coordinates from axis vectors.
 - **Mesh subclass:** decodes `(…, N_dof[, D])` arrays; attaches `geometry`/`dof_map`.
 
-**Writer contract (>= 0.3.0).** Datasets whose bulk fields exceed memory are written
-through an incremental `DatasetWriter`: streamed fields carry `field_placeholder`
-data, must be `sample_varying`, and are created at full shape (chunked by
-trajectory/timestep) and filled trajectory-by-trajectory with `append`; everything
-else is written on entering. Normalization is written on close, so statistics
-computed during the pass can be set with `update_normalization`. Closing verifies
-completeness, and any failure deletes the file — a partial write never leaves a
-valid-looking file. `write_dataset` is the all-inline degenerate case. Both accept a
-`Compression` spec (filter, level, byte-shuffle) applied to every field and
-boundary-condition dataset.
+**Writer contract (>= 0.3.0).** Datasets whose bulk fields exceed memory are written through an incremental `DatasetWriter`: streamed fields carry `field_placeholder` data, must be `sample_varying`, and are created at full shape (chunked by trajectory/timestep) and filled trajectory-by-trajectory with `append`; everything else is written on entering.
+Normalization is written on close, so statistics computed during the pass can be set with `update_normalization`.
+Closing verifies completeness, and any failure deletes the file — a partial write never leaves a valid-looking file.
+`write_dataset` is the all-inline degenerate case.
+Both accept a `Compression` spec (filter, level, byte-shuffle) applied to every field and boundary-condition dataset.
 
-**Within-representation multi-physics** uses a scenario-interleaved sampler
-above the loaders: each batch is drawn from one dataset (homogeneous spatial
-shape, trivial collate), datasets interleaved across batches. The field registry
-keeps shared fields identity-consistent so the model can share parameters; the
-presence list + a channel mask let it ingest variable field sets.
+**Within-representation multi-physics** uses a scenario-interleaved sampler above the loaders: each batch is drawn from one dataset (homogeneous spatial shape, trivial collate), datasets interleaved across batches.
+The field registry keeps shared fields identity-consistent so the model can share parameters; the presence list + a channel mask let it ingest variable field sets.
 
 ---
 
 ## 9. Open points to settle next
 
 - Whether `vertices` is per-trajectory or shared (affects mesh storage cost).
-- Conditioning interface: do you broadcast `parameter` fields into channels, or
-  pass them as a separate conditioning vector? (Storage is identical; this is a
-  loader choice.)
-- Compression/chunking defaults per profile. Today compression is chosen per
-  write and only streamed fields are chunked (by trajectory, and timestep if
-  present); mesh would chunk by trajectory × DOF blocks.
+- Conditioning interface: do you broadcast `parameter` fields into channels, or pass them as a separate conditioning vector?
+  (Storage is identical; this is a loader choice.)
+- Compression/chunking defaults per profile.
+  Today compression is chosen per write and only streamed fields are chunked (by trajectory, and timestep if present); mesh would chunk by trajectory × DOF blocks.
 - The `particle` representation has no profile yet.
