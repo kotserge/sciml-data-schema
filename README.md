@@ -1,7 +1,7 @@
 # sciml-data-schema
 
 An HDF5 dataset format and metadata schema for PDE / physics simulation data, designed for scientific machine learning, based on the work of [The Well](https://github.com/PolymathicAI/the_well).
-A single file holds one dataset of`n_trajectories` independent runs over a shared spatial domain.
+A single file holds one dataset of `n_trajectories` independent runs over a shared spatial domain.
 The full design is in [`SCHEMA.md`](SCHEMA.md).
 
 - `sciml_data_schema.schema` — the in-memory dataset representation (`Dataset`, `Field`, `FieldSpec`, `Dimension`, `BoundaryCondition`, `Normalization`) and the canonical HDF5 group/attribute names.
@@ -37,40 +37,76 @@ Runtime dependencies are `h5py` and `numpy`.
 
 ## Usage
 
+A dataset of 4 trajectories of a 2D scalar field `u(t, x, y)`, conditioned on one Reynolds number per trajectory:
+
 ```python
 import numpy as np
 import sciml_data_schema as sds
 
+n_traj, n_steps, nx, ny = 4, 10, 32, 32
+rng = np.random.default_rng(0)
+u = rng.standard_normal((n_traj, n_steps, nx, ny)).astype(np.float32)
+reynolds = np.array([100.0, 200.0, 400.0, 800.0], dtype=np.float32)
+
 dataset = sds.Dataset(
-    dataset_name="poisson_2d",
+    dataset_name="flow_2d",
     representation="grid",
     n_spatial_dims=2,
-    n_trajectories=1,
+    n_trajectories=n_traj,
     spatial_dims=["x", "y"],
     dimensions=[
-        sds.Dimension("x", np.linspace(0, 1, 32)),
-        sds.Dimension("y", np.linspace(0, 1, 32)),
+        sds.Dimension("x", np.linspace(0, 1, nx, dtype=np.float32)),
+        sds.Dimension("y", np.linspace(0, 1, ny, dtype=np.float32)),
+        sds.Dimension("time", np.linspace(0, 1, n_steps, dtype=np.float32)),
     ],
     fields=[
-        sds.Field("u", np.zeros((1, 32, 32)), role="state", time_varying=False),
+        # State: shape (n_traj, n_steps, nx, ny)
+        sds.Field("u", u, role="state", unit="m/s"),
+        # Parameter: one value per trajectory, shape (n_traj,)
+        sds.Field("reynolds", reynolds, role="parameter", dim_varying=False, time_varying=False),
     ],
+    boundary_conditions=[
+        sds.BoundaryCondition("periodic", bc_type="periodic", associated_dims=["x", "y"]),
+    ],
+    normalization={"u": sds.Normalization(mean=np.asarray(u.mean()), std=np.asarray(u.std()))},
+    provenance={"generator": "readme-example"},
 )
 
-sds.write_dataset(dataset, "run.h5", compression="gzip")
+sds.write_dataset(dataset, "flow_2d.h5", compression=sds.Compression("gzip", level=1, shuffle=True))
 
-ds = sds.read_dataset("run.h5")
-u = next(f for f in ds.fields if f.role == "state")
+# Route fields by role: state fields are targets, everything else conditions
+loaded = sds.read_dataset("flow_2d.h5")
+targets = [f for f in loaded.fields if f.role == "state"]
+conditioning = [f for f in loaded.fields if f.role != "state"]
+dx = loaded.coords["x"][1] - loaded.coords["x"][0]
 ```
 
-`write_dataset` validates the dataset before touching disk, so a malformed dataset raises `ValueError` and leaves no file behind.
+`write_dataset` and `read_dataset` validate the dataset; a malformed dataset raises `ValueError` and leaves no file behind.
+
+When the bulk data does not fit in memory, stream it one trajectory at a time.
+The streamed field carries a `field_placeholder` of its full shape, and statistics computed during the pass are set before the file closes:
+
+```python
+u_field = next(f for f in dataset.fields if f.name == "u")
+u_field.data = sds.field_placeholder((n_traj, n_steps, nx, ny), np.float32)
+
+with sds.DatasetWriter(dataset, "flow_2d_streamed.h5", streamed=["u"]) as writer:
+    for i in range(n_traj):
+        writer.append("u", i, u[i])  # e.g. the output of one simulation run
+    stats = sds.Normalization(mean=np.asarray(u.mean()), std=np.asarray(u.std()))
+    writer.update_normalization("u", stats)
+```
+
+If the block raises, or exits before every trajectory of every streamed field has been appended, the writer deletes the file; the error propagates or a `ValueError` is raised.
 See [`examples/advection_diffusion.py`](examples/advection_diffusion.py) for a complete, runnable scenario (build → write → read → role-routed window).
 
 ## Development
 
+Recipes are in the [`justfile`](justfile):
+
 ```bash
-uv sync --extra dev
-uv run pytest        # tests
-uv run ruff check    # lint
-uv run ruff format   # format
-uv run basedpyright  # type-check
+just sync       # install the package and dev dependencies
+just check      # lint, type check, tests
+just fmt        # format
+just test -k io # run a subset of the tests
 ```
