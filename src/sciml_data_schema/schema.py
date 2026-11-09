@@ -209,7 +209,7 @@ class Field:
 
     @property
     def spec(self) -> FieldSpec:
-        """This field's registry identity."""
+        """Registry identity of the field."""
         return FieldSpec(self.tensor_order, self.role, self.unit)
 
     def expected_ndim(self, n_spatial_dims: int) -> int:

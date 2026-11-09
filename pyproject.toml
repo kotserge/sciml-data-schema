@@ -50,7 +50,11 @@ select = [
     "UP",  # pyupgrade
     "B",   # flake8-bugbear
     "W",   # pycodestyle warnings
+    "D",   # pydocstyle
 ]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

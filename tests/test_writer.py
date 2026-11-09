@@ -89,7 +89,7 @@ def test_exception_inside_context_removes_file(
 def test_append_rejects_bad_shape_and_dtype(
     make_dataset: Callable[[], sds.Dataset], tmp_path: Path
 ) -> None:
-    """append rejects a slice of the wrong shape or dtype, and the file is deleted."""
+    """DatasetWriter.append rejects a slice of the wrong shape or dtype, and the file is deleted."""
     dataset, pressure = _streamed_copy(make_dataset(), "pressure")
     path = tmp_path / "checked.h5"
 
