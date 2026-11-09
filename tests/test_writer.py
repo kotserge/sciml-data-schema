@@ -175,3 +175,29 @@ def test_write_dataset_still_roundtrips_via_writer(
     original = make_dataset()
     loaded = sds.read_dataset(sds.write_dataset(original, tmp_path / "plain.h5"))
     assert loaded.present_fields == original.present_fields
+
+
+@pytest.mark.parametrize("mode", ["a", "r+"])
+def test_editing_mode_is_rejected_and_existing_file_kept(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path, mode: str
+) -> None:
+    """A mode that edits an existing file raises before the file is opened or changed."""
+    path = sds.write_dataset(make_dataset(), tmp_path / "existing.h5")
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="unsupported mode"):
+        sds.DatasetWriter(make_dataset(), path, streamed=(), mode=mode)  # type: ignore[arg-type]
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("mode", ["w-", "x"])
+def test_exclusive_mode_keeps_existing_file(
+    make_dataset: Callable[[], sds.Dataset], tmp_path: Path, mode: sds.WriteMode
+) -> None:
+    """An exclusive-create mode on an existing file raises and leaves the file intact."""
+    path = sds.write_dataset(make_dataset(), tmp_path / "existing.h5")
+    before = path.read_bytes()
+
+    with pytest.raises(FileExistsError):
+        sds.write_dataset(make_dataset(), path, mode=mode)
+    assert path.read_bytes() == before

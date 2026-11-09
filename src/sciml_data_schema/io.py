@@ -19,16 +19,28 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import h5py
 import numpy as np
 
 from . import schema as s
 
-__all__ = ["write_dataset", "read_dataset", "Compression", "DatasetWriter", "field_placeholder"]
+__all__ = [
+    "write_dataset",
+    "read_dataset",
+    "Compression",
+    "DatasetWriter",
+    "WriteMode",
+    "WRITE_MODES",
+    "field_placeholder",
+]
 
 StrPath = str | PathLike[str]
+
+# h5py.File modes that create a file; modes that open an existing file for editing are rejected
+WriteMode = Literal["w", "w-", "x"]
+WRITE_MODES: tuple[WriteMode, ...] = ("w", "w-", "x")
 
 # Variable-length UTF-8 string dtype for HDF5 string-array attributes
 _STR = h5py.string_dtype("utf-8")
@@ -93,7 +105,7 @@ def write_dataset(
     dataset: s.Dataset,
     path: StrPath,
     *,
-    mode: str = "w",
+    mode: WriteMode = "w",
     compression: CompressionLike = None,
 ) -> Path:
     """Validate ``dataset`` and write it to ``path`` as a single HDF5 file.
@@ -107,9 +119,9 @@ def write_dataset(
         Dataset to write, with all field data in memory.
     path : str or PathLike
         Destination file.
-    mode : str
-        ``h5py.File`` mode; ``"w"`` truncates, ``"w-"``/``"x"`` fail if the
-        file exists.
+    mode : WriteMode
+        ``h5py.File`` mode; ``"w"`` replaces an existing file, ``"w-"``/``"x"``
+        fail if the file exists.
     compression : str, Compression or None
         Filter name (e.g. ``"gzip"``), full spec, or ``None`` for uncompressed.
 
@@ -121,7 +133,10 @@ def write_dataset(
     Raises
     ------
     ValueError
-        If :meth:`Dataset.validate` fails; nothing is written.
+        If ``mode`` is not in ``WRITE_MODES`` or :meth:`Dataset.validate`
+        fails; nothing is written.
+    FileExistsError
+        If ``mode`` is ``"w-"``/``"x"`` and the file exists; it is left untouched.
     """
     with DatasetWriter(dataset, path, streamed=(), mode=mode, compression=compression):
         pass
@@ -159,7 +174,8 @@ class DatasetWriter:
     timestep, if present). Fill it with :meth:`append`. Leaving the context
     checks that every trajectory of every streamed field was written and
     writes the normalization. On any failure -- an exception inside the
-    block, or missing trajectories -- the file is deleted.
+    block, or missing trajectories -- the file is deleted. The writer only
+    creates files; it never edits an existing one.
 
     Parameters
     ----------
@@ -170,16 +186,18 @@ class DatasetWriter:
         Destination file.
     streamed : tuple[str, ...] or list[str]
         Fields written trajectory by trajectory; each must be ``sample_varying``.
-    mode : str
-        ``h5py.File`` mode. The file is deleted on failure in any mode.
+    mode : WriteMode
+        ``h5py.File`` mode; ``"w"`` replaces an existing file (which is then
+        deleted if the write fails), ``"w-"``/``"x"`` fail if the file exists.
     compression : str, Compression or None
         Filter name, full spec, or ``None`` for uncompressed.
 
     Raises
     ------
     ValueError
-        If :meth:`Dataset.validate` fails, a ``streamed`` name is not a field
-        of ``dataset``, or a streamed field is not ``sample_varying``.
+        If ``mode`` is not in ``WRITE_MODES``, :meth:`Dataset.validate` fails,
+        a ``streamed`` name is not a field of ``dataset``, or a streamed field
+        is not ``sample_varying``.
 
     Examples
     --------
@@ -194,9 +212,13 @@ class DatasetWriter:
         path: StrPath,
         *,
         streamed: tuple[str, ...] | list[str],
-        mode: str = "w",
+        mode: WriteMode = "w",
         compression: CompressionLike = None,
     ) -> None:
+        # Editing modes ("a", "r+") would overwrite an existing file's attributes, then delete it
+        if mode not in WRITE_MODES:
+            raise ValueError(f"unsupported mode {mode!r}: expected one of {list(WRITE_MODES)}")
+
         # Validate before touching the disk, mirroring write_dataset's contract
         dataset.validate()
 
@@ -230,9 +252,11 @@ class DatasetWriter:
 
         Raises
         ------
+        FileExistsError
+            If ``mode`` is ``"w-"``/``"x"`` and the file exists; it is left untouched.
         OSError
-            If the file cannot be opened in ``mode``; any error while writing
-            deletes the file and propagates.
+            If the file cannot be created; any error while writing deletes the
+            file and propagates.
         """
         dataset = self._dataset
         registry = dataset.effective_registry()
